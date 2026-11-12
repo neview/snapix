@@ -22,7 +22,7 @@ pub fn rgba_to_bmp(img: &RgbaImage) -> Vec<u8> {
     let h = img.height() as usize;
     let data_size = w * h * 4;
     let raw = img.as_raw();
-    let has_alpha = raw.chunks_exact(4).any(|p| p[3] != 0xFF);
+    let has_alpha = raw.as_chunks::<4>().0.iter().any(|p| p[3] != 0xFF);
     let info_size = if has_alpha {
         V4_HEADER_SIZE
     } else {
@@ -66,7 +66,12 @@ pub fn rgba_to_bmp(img: &RgbaImage) -> Vec<u8> {
     let start = out.len();
     out.resize(start + data_size, 0);
     let dst = &mut out[start..];
-    for (d, s) in dst.chunks_exact_mut(4).zip(raw.chunks_exact(4)) {
+    for (d, s) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(raw.as_chunks::<4>().0)
+    {
         d[0] = s[2];
         d[1] = s[1];
         d[2] = s[0];

@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # 代理屏蔽 github.com 的 git 推送时，可用 tag ref 手动触发：
+  # gh workflow run release.yml --ref v0.6.2
+  workflow_dispatch:
 
 permissions:
   contents: write
