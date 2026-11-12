@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & publish (NSIS · MSI · latest.json)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 tag 与 package.json 版本一致
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            throw "package.json 版本 $v 与 tag ${{ github.ref_name }} 不一致"
+          }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Snapix ${{ github.ref_name }}
+          releaseBody: |
+            Windows 安装包：`Snapix_*_x64-setup.exe`。
+
+            0.6.2 起内置自动更新：已安装的用户会在设置里看到「发现新版本」，下载后自动校验签名并安装。
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          # 同时产出 NSIS 与 MSI 时，更新包必须选 NSIS（配置里的 installMode 也是 NSIS）
+          updaterJsonPreferNsis: true

@@ -1,0 +1,9 @@
+dist
+node_modules
+pnpm-lock.yaml
+src-tauri/target
+src-tauri/gen
+src-tauri/Cargo.lock
+# 设计文档以人手排版为准（表格对齐等），不由 Prettier 重排
+docs
+.workbuddy

@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Snapix Design Tokens · "Quiet Glass"
+   单色石墨 + 极细高光边 + 柔和氛围光。
+   不靠彩色区分层级，只靠明度、留白与发丝线。
+   ============================================================ */
+@theme {
+  /* 强调色：克制的雾霭灰蓝，只在「选中 / 激活」时出现，不参与大面积铺色 */
+  --color-brand-50: #f6f7f9;
+  --color-brand-100: #eceef1;
+  --color-brand-200: #dcdfe4;
+  --color-brand-300: #c2c7cf;
+  --color-brand-400: #9aa1ac;
+  --color-brand-500: #737a86;
+  --color-brand-600: #5a616c;
+  --color-brand-700: #454b55;
+  --color-brand-800: #2f343c;
+  --color-brand-900: #1e2228;
+
+  /* 中性灰（界面底色 / 文本），整体压暗一档、去掉蓝紫倾向 */
+  --color-ink-0: #ffffff;
+  --color-ink-50: #f5f5f7;
+  --color-ink-100: #e8e8ec;
+  --color-ink-200: #d2d2d8;
+  --color-ink-300: #a8a8b0;
+  --color-ink-400: #7c7c85;
+  --color-ink-500: #55555d;
+  --color-ink-600: #3a3a41;
+  --color-ink-700: #26262b;
+  --color-ink-800: #17171a;
+  --color-ink-900: #0f0f11;
+  --color-ink-950: #08080a;
+
+  /* 圆角 */
+  --radius-toolbar: 14px;
+  --radius-panel: 16px;
+  --radius-btn: 10px;
+  --radius-pin: 10px;
+
+  /* 阴影：大而散、低不透明度，像「浮起来」而不是「画上去」 */
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.24), 0 4px 12px rgba(0, 0, 0, 0.16);
+  --shadow-float: 0 2px 6px rgba(0, 0, 0, 0.26), 0 12px 32px -6px rgba(0, 0, 0, 0.42);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.3), 0 28px 64px -12px rgba(0, 0, 0, 0.62);
+
+  /* 动效 */
+  --ease-snap: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 全局基线 */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI Variable Text",
+    "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-feature-settings: "tnum" 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+}
+
+/* 标题字：稍紧的字距 + 更重的字重，模仿 SF Display 的标题观感 */
+.display {
+  letter-spacing: -0.018em;
+  font-weight: 600;
+}
+
+/* 玻璃层：低饱和、低反差，靠 blur 与发丝边分层 */
+.glass {
+  background: color-mix(in srgb, #0c0c0e 68%, transparent);
+  backdrop-filter: blur(28px) saturate(120%);
+  -webkit-backdrop-filter: blur(28px) saturate(120%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* 玻璃胶囊（悬浮工具条 / 提示） */
+.capsule {
+  background: rgba(12, 12, 14, 0.72);
+  backdrop-filter: blur(24px) saturate(130%);
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 28px -8px rgba(0, 0, 0, 0.6);
+}
+
+/* 发丝分割线：1px 且只有 6% 白，比 border-white/10 更安静 */
+.hairline {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* 滚动条：只在悬停时显形，平时几乎看不见 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- 晾衣绳：只做 transform / opacity 的入场动画（合成层，不重排不重绘） ---- */
+
+/* 新图挂上绳子：从上方落下，带一点回弹 */
+@keyframes line-drop {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -40px, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 小浮层（工具条 / 提示）淡入 */
+@keyframes line-hint {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 晾衣绳条目：换位默认带过渡（新图挤进来时「让一让」）；
+   拖动/落位期间挂 .no-anim 关掉，避免和手写的 transform 抢帧 */
+.line-item {
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.line-item.no-anim {
+  transition: none;
+}

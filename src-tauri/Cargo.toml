@@ -1,0 +1,77 @@
+[package]
+name = "tauri-app"
+version = "0.6.2"
+description = "Snapix — 全能 Windows 截图工具"
+authors = ["Snapix"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# dev 构建的图像热路径（BMP 直出 / 裁剪 / PNG 编码）需要基本优化，
+# 否则 4K 冻屏帧在调试模式下延迟数秒
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package.image]
+opt-level = 2
+
+[profile.dev.package.xcap]
+opt-level = 2
+
+# 发布构建：全程序 LTO + 单编译单元换取更小体积与更好的热路径性能；
+# 保留 panic=unwind，会话线程崩溃时 Drop guard 才能复位状态门闩。
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xcap = "0.9.6"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-dialog = "2.7.1"
+base64 = "0.22.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+regex = "1"
+gif = "0.14"
+rqrr = { version = "0.11", default-features = false }
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2.14.1"
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+] }
+

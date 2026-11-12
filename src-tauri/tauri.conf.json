@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Snapix",
+  "version": "0.6.2",
+  "identifier": "com.snapix.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Snapix",
+        "url": "index.html",
+        "width": 940,
+        "height": 640,
+        "minWidth": 760,
+        "minHeight": 520,
+        "resizable": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
+      },
+      {
+        "label": "editor",
+        "title": "Snapix · 标注",
+        "url": "editor.html",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 520,
+        "visible": false,
+        "resizable": true,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://shot.localhost data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'",
+      "devCsp": "default-src 'self' ipc: http://ipc.localhost http://localhost:1430 ws://localhost:1430 ws://localhost:1431; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1430; style-src 'self' 'unsafe-inline' http://localhost:1430; img-src 'self' http://shot.localhost http://localhost:1430 data: blob:; font-src 'self' data: http://localhost:1430; connect-src 'self' ipc: http://ipc.localhost http://localhost:1430 ws://localhost:1430 ws://localhost:1431; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/neview/snapix/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDOTY3RjYzNUJBNkRFQzYKUldURzNxWmJZMytXM0pYQk15MVd4R3hiWUQwNEI0K2MvNXZIK1paN2ZMdFBHU0Fyb29KTmFsNWgK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

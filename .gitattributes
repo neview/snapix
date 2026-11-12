@@ -1,0 +1,9 @@
+# 统一按 LF 入库，检出时按平台换行；二进制资源不做转换
+* text=auto
+
+*.png binary
+*.ico binary
+*.icns binary
+*.gif binary
+*.jpg binary
+*.svg text
