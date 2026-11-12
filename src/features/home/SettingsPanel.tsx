@@ -206,6 +206,9 @@ export default function SettingsPanel({
         <Row label="保存后复制到剪贴板">
           <Toggle checked={s.copyAfterSave} onChange={(v) => patch({ copyAfterSave: v })} />
         </Row>
+        <Row label="截图包含鼠标光标" hint="把当前光标画进截图；全屏 / 窗口即拍同样生效">
+          <Toggle checked={s.captureCursor} onChange={(v) => patch({ captureCursor: v })} />
+        </Row>
       </Section>
 
       <Section icon={History} title="历史记录">

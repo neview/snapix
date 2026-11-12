@@ -26,22 +26,6 @@
         "transparent": true,
         "shadow": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
-      },
-      {
-        "label": "editor",
-        "title": "Snapix · 标注",
-        "url": "editor.html",
-        "width": 1120,
-        "height": 760,
-        "minWidth": 720,
-        "minHeight": 520,
-        "visible": false,
-        "resizable": true,
-        "center": true,
-        "decorations": false,
-        "transparent": true,
-        "shadow": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
       }
     ],
     "security": {

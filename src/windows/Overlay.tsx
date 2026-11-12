@@ -592,12 +592,12 @@ export default function Overlay() {
     }
   };
 
-  const doScroll = async () => {
+  const doScroll = async (horizontal = false) => {
     if (!sel || sel.w < MIN_SIZE || sel.h < MIN_SIZE) return;
     const p = toPhysical(sel);
     try {
       // 成功后 Rust 侧接管（隐藏遮罩、弹控制条），失败则保留选区提示原因
-      await scrollCaptureStart(p.x, p.y, p.w, p.h);
+      await scrollCaptureStart(p.x, p.y, p.w, p.h, horizontal);
       reset();
       releaseFrame();
     } catch (e) {
@@ -1126,7 +1126,11 @@ export default function Overlay() {
               <ToolButton icon={PenLine} label="标注 (Ctrl+E)" onClick={doAnnotate} />
               <ToolButton icon={Pin} label="贴图置顶 (Ctrl+T)" onClick={doPin} />
               <ToolButton icon={ScanIcon} label="OCR / 二维码识别" onClick={doOcr} />
-              <ToolButton icon={ScrollText} label="滚动长截图" onClick={doScroll} />
+              <ToolButton
+                icon={ScrollText}
+                label="滚动长截图（按住 Shift = 横向）"
+                onClick={(e) => void doScroll(e.shiftKey)}
+              />
               <ToolButton icon={Film} label="录制 GIF（10fps · 停止自动保存）" onClick={doGif} />
               <div className="mx-1 h-5 w-px bg-white/10" />
               <ToolButton icon={Copy} label="复制 (Ctrl+C)" onClick={doCopy} />
@@ -1202,7 +1206,7 @@ function ToolButton({
 }: {
   icon: React.ComponentType<{ size?: number }>;
   label: string;
-  onClick?: () => void;
+  onClick?: (e: React.MouseEvent) => void;
   disabled?: boolean;
 }) {
   return (
@@ -1211,7 +1215,7 @@ function ToolButton({
       onMouseDown={(e) => {
         // 用 mousedown 而非 click 是为了即时响应，但必须只认左键：右键/中键不能触发保存等动作
         e.stopPropagation();
-        if (e.button === 0) onClick?.();
+        if (e.button === 0) onClick?.(e);
       }}
       className="group relative grid h-9 w-9 place-items-center rounded-lg text-ink-200 transition-colors hover:bg-white/10 hover:text-ink-0 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
       title={label}

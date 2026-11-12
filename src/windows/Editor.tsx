@@ -47,6 +47,8 @@ import {
   detectPrivacy,
   pinData,
   editClipboard,
+  editorPending,
+  editorReady,
   type ImagePayload,
 } from "@/lib/ipc";
 
@@ -200,13 +202,21 @@ export default function Editor() {
 
   // 接收待标注图像（shot:// 协议）
   useEffect(() => {
-    const un = listen<ImagePayload>("editor:open", (e) => {
-      setImage({
-        url: e.payload.imageUrl,
-        width: e.payload.width,
-        height: e.payload.height,
+    const apply = (p: ImagePayload) =>
+      setImage({ url: p.imageUrl, width: p.width, height: p.height });
+    const un = listen<ImagePayload>("editor:open", (e) => apply(e.payload));
+    // 窗口是首次标注时才创建的：创建那一刻事件可能早于本监听，主动拉一次兜底
+    editorPending()
+      .then((p) => {
+        if (p) apply(p);
+      })
+      .catch(() => {})
+      .finally(() => {
+        // 隐藏创建 → 等这一帧画完再显示，用户看不到白窗（隐藏窗口的 rAF 可能被节流，用定时器）
+        window.setTimeout(() => {
+          editorReady().catch(() => {});
+        }, 200);
       });
-    });
     return () => {
       un.then((f) => f());
     };

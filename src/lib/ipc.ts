@@ -57,6 +57,8 @@ export type Settings = {
   lineEnabled: boolean;
   /** 启动后自动检查更新 */
   updateCheck: boolean;
+  /** 截图是否把鼠标光标一起拍进去 */
+  captureCursor: boolean;
 };
 
 /** 历史记录条目。 */
@@ -210,11 +212,22 @@ export function togglePins() {
 // ===================== 滚动长截图 =====================
 
 /** 滚动截图进度事件载荷。 */
-export type ScrollProgress = { heightPx: number; frames: number };
+export type ScrollProgress = {
+  /** 横向滚动（控制条据此改文案） */
+  horizontal: boolean;
+  heightPx: number;
+  frames: number;
+};
 
 /** 对选区开始滚动长截图（自动滚动 + 拼接）。 */
-export function scrollCaptureStart(x: number, y: number, width: number, height: number) {
-  return invoke("scroll_capture_start", { x, y, width, height });
+export function scrollCaptureStart(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  horizontal = false,
+) {
+  return invoke("scroll_capture_start", { x, y, width, height, horizontal });
 }
 
 /** 结束滚动截图并装配长图进编辑器。 */
@@ -262,6 +275,16 @@ export function saveImage(dataUrl: string) {
 /** 关闭标注编辑器。 */
 export function closeEditor() {
   return invoke("close_editor");
+}
+
+/** 标注窗口按需创建：挂载时拉取待标注图（事件可能早于监听）。 */
+export function editorPending() {
+  return invoke<ImagePayload | null>("editor_pending");
+}
+
+/** 首帧画好后通知后端显示标注窗口（新建窗口默认隐藏，避免白闪）。 */
+export function editorReady() {
+  return invoke("editor_ready");
 }
 
 // ===================== 贴图 =====================
