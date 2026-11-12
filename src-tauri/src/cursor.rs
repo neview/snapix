@@ -127,7 +127,7 @@ pub fn snapshot() -> Option<CursorShot> {
         };
         let alpha_in_color = color
             .as_ref()
-            .is_some_and(|c| c.chunks_exact(4).any(|p| p[3] != 0));
+            .is_some_and(|c| c.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
         let mask = if alpha_in_color {
             None
         } else if !ii.hbmMask.is_invalid() {
@@ -139,37 +139,22 @@ pub fn snapshot() -> Option<CursorShot> {
 
         let mut rgba = vec![0u8; w as usize * h as usize * 4];
         for i in 0..(w as usize * h as usize) {
+            // 彩色图无 alpha 时靠 mask 决定透明度（mask 白 = 透）；单色光标直接按 mask 画黑白
+            let mask_clear = mask.as_ref().is_some_and(|m| m[i * 4] >= 128);
             let (b, g, r, a) = match &color {
                 Some(c) => {
                     let p = &c[i * 4..i * 4 + 4];
                     let a = if alpha_in_color {
                         p[3]
+                    } else if mask_clear {
+                        0
                     } else {
-                        // 彩色图无 alpha：靠 mask 决定透明（白 = 透）
-                        match &mask {
-                            Some(m) => {
-                                if m[i * 4] >= 128 {
-                                    0
-                                } else {
-                                    255
-                                }
-                            }
-                            None => 255,
-                        }
+                        255
                     };
                     (p[0], p[1], p[2], a)
                 }
-                None => match &mask {
-                    Some(m) => {
-                        // 单色光标：mask 为 0 的位置用 AND/XOR 绘制，这里按不透明处理
-                        if m[i * 4] >= 128 {
-                            (0, 0, 0, 0)
-                        } else {
-                            (255, 255, 255, 255)
-                        }
-                    }
-                    None => (0, 0, 0, 0),
-                },
+                None if mask_clear => (0, 0, 0, 0),
+                None => (255, 255, 255, 255),
             };
             rgba[i * 4] = r;
             rgba[i * 4 + 1] = g;
