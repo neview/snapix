@@ -1008,7 +1008,7 @@ fn prepare_detach_now(
     tx: mpsc::Sender<Result<String, String>>,
 ) -> Result<(), String> {
     let st = app.try_state::<LineState>().ok_or("晾衣绳状态缺失")?;
-    eprintln!("[line] detach 准备 id={id}");
+    log::info!("detach 准备 id={id}");
     // 记下它原本挂在绳上的位置：双击挂回时飞回原处（原来是自动排布的就回末尾）。
     let return_slot = {
         let items = lock(&st.items);
@@ -1140,7 +1140,7 @@ pub async fn line_reveal_detach(app: AppHandle, id: String, label: String) -> Re
             if let Some(p) = lock(&st.detaches).get_mut(&id) {
                 p.phase = DetachPhase::Revealed;
             }
-            eprintln!("[line] detach 显示 id={id}");
+            log::info!("detach 显示 id={id}");
             Ok(())
         })
     })
@@ -1166,7 +1166,7 @@ pub async fn line_finish_detach(app: AppHandle, id: String, label: String) -> Re
             lock(&st.detaches).remove(&id);
             remove_entry(app, &id);
             crate::capture::prewarm_pin(app);
-            eprintln!("[line] detach 完成 id={id}");
+            log::info!("detach 完成 id={id}");
             Ok(())
         })
     })

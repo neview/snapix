@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { Copy, Pin, X } from "lucide-react";
+import { Copy, Pin, Trash2, Check, Save } from "lucide-react";
 import {
   lineCancelDetach,
   lineCopy,
@@ -17,6 +17,7 @@ import {
   lineReturnLanded,
   lineReturnTakeoff,
   lineRevealDetach,
+  lineSave,
   type LineItem,
   type LineReturnFlight,
 } from "@/lib/ipc";
@@ -67,6 +68,15 @@ export default function Line() {
   const [width, setWidth] = useState(() => window.innerWidth);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
+  const [menu, setMenu] = useState<{
+    item: Placed;
+    image: HTMLImageElement | null;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [menuConfirm, setMenuConfirm] = useState(false);
+  const prevVisible = useRef<Set<string> | null>(null);
   const flightLayer = useRef<HTMLDivElement>(null);
   const active = useRef<Flight | null>(null);
   const acting = useRef(false);
@@ -131,6 +141,22 @@ export default function Line() {
       })),
     [items],
   );
+  // 新图落地时播一次「从绳上垂下」的入场动画；首次加载不播，避免整排一起掉。
+  useEffect(() => {
+    const visible = items.filter((it) => !it.pending);
+    const ids = new Set(visible.map((it) => it.id));
+    if (prevVisible.current === null) {
+      prevVisible.current = ids;
+      return;
+    }
+    const fresh = visible.filter((it) => !prevVisible.current!.has(it.id)).map((it) => it.id);
+    prevVisible.current = ids;
+    if (!fresh.length) return;
+    setFreshIds(new Set(fresh));
+    const timer = window.setTimeout(() => setFreshIds(new Set()), 700);
+    return () => window.clearTimeout(timer);
+  }, [items]);
+
   useEffect(() => {
     const dpr = window.devicePixelRatio || 1;
     const rects = placed
@@ -386,6 +412,29 @@ export default function Line() {
     void lineMove(id, t).catch(() => {});
   }, []);
 
+  const openMenu = useCallback(
+    (item: Placed, image: HTMLImageElement | null, e: React.MouseEvent) => {
+      e.preventDefault();
+      setMenuConfirm(false);
+      setMenu({ item, image, x: e.clientX, y: e.clientY });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
   const ropePath = `M 0 ${ROPE_Y} Q ${width / 2} ${ROPE_Y + sag * 2} ${width} ${ROPE_Y}`;
   return (
     <div className="relative h-screen w-screen select-none overflow-hidden">
@@ -431,10 +480,12 @@ export default function Line() {
           left={item.t * width - item.w / 2}
           top={ropeY(item.t, sag)}
           busy={busy !== null}
+          fresh={freshIds.has(item.id)}
           onExpand={(image) => void expand(item, image)}
           onCopy={() => void act(item.id, () => lineCopy(item.id))}
           onRemove={() => void act(item.id, () => lineRemove(item.id))}
           onMove={commitX}
+          onContextMenu={openMenu}
         />
       ))}
       <div
@@ -442,6 +493,60 @@ export default function Line() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 z-40"
       />
+      {menu && (
+        <div
+          className="fixed z-50 w-[150px] overflow-hidden rounded-[10px] border border-white/10 bg-[#17171b]/95 p-1 text-[11.5px] text-white/80 shadow-[0_16px_40px_-12px_rgba(0,0,0,.85)] backdrop-blur"
+          style={{
+            left: Math.min(menu.x, width - 158),
+            top: Math.min(menu.y, window.innerHeight - 174),
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <LineMenuItem
+            icon={Copy}
+            label="复制"
+            onClick={() => {
+              const m = menu;
+              setMenu(null);
+              void act(m.item.id, () => lineCopy(m.item.id));
+            }}
+          />
+          <LineMenuItem
+            icon={Pin}
+            label="展开为贴图"
+            onClick={() => {
+              const m = menu;
+              setMenu(null);
+              if (m.image) void expand(m.item, m.image);
+            }}
+          />
+          <LineMenuItem
+            icon={Save}
+            label="保存…"
+            onClick={() => {
+              const m = menu;
+              setMenu(null);
+              void act(m.item.id, () => lineSave(m.item.id));
+            }}
+          />
+          <div className="my-1 h-px bg-white/[0.07]" />
+          <LineMenuItem
+            icon={Trash2}
+            label={menuConfirm ? "确认删除" : "删除"}
+            danger={menuConfirm}
+            onClick={() => {
+              const m = menu;
+              if (!menuConfirm) {
+                setMenuConfirm(true);
+                return;
+              }
+              setMenu(null);
+              void act(m.item.id, () => lineRemove(m.item.id));
+            }}
+          />
+        </div>
+      )}
       {error && (
         <div
           role="alert"
@@ -474,10 +579,12 @@ function LinePhoto({
   left,
   top,
   busy,
+  fresh,
   onExpand,
   onCopy,
   onRemove,
   onMove,
+  onContextMenu,
 }: {
   item: Placed;
   width: number;
@@ -485,10 +592,12 @@ function LinePhoto({
   left: number;
   top: number;
   busy: boolean;
+  fresh: boolean;
   onExpand: (image: HTMLImageElement) => void;
   onCopy: () => void;
   onRemove: () => void;
   onMove: (id: string, t: number) => void;
+  onContextMenu: (item: Placed, image: HTMLImageElement | null, e: React.MouseEvent) => void;
 }) {
   const image = useRef<HTMLImageElement>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -498,6 +607,15 @@ function LinePhoto({
   const swallowed = useRef(false);
   const [loaded, setLoaded] = useState(false);
   const [grabbing, setGrabbing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+    },
+    [],
+  );
   // 摆角积分器：拖动中朝「速度反方向」偏，松手后阻尼回摆
   const swingState = useRef({
     angle: 0,
@@ -648,6 +766,10 @@ function LinePhoto({
     }
   };
 
+  // 悬浮胶囊按屏幕边缘夹一下，避免第一张 / 最后一张的按钮被裁掉
+  const capHalf = 58;
+  const capCenter = clamp(left + item.w / 2, capHalf + 6, width - capHalf - 6);
+
   return (
     <div
       ref={root}
@@ -663,6 +785,10 @@ function LinePhoto({
       onPointerUp={(e) => endDrag(e, true)}
       onPointerCancel={(e) => endDrag(e, false)}
       onLostPointerCapture={(e) => endDrag(e, false)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(item, image.current, e);
+      }}
     >
       {/* 吊线 + 图片整组挂在一个锚点上，拖动时绕绳上的挂点摆动 */}
       <div
@@ -671,43 +797,71 @@ function LinePhoto({
         style={{ width: item.w, transformOrigin: "50% 0%", willChange: "transform" }}
       >
         <div
-          className="pointer-events-none absolute left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-white/28 to-white/12"
-          style={{ height: HANG }}
-        />
-        <div className="pointer-events-none absolute -top-0.5 left-1/2 h-[5px] w-[5px] -translate-x-1/2 rounded-full border border-white/30 bg-white/10" />
-        <button
-          type="button"
-          title="点击展开截图"
-          aria-label="展开截图"
-          disabled={busy || !!item.pending || !loaded}
-          className="block cursor-pointer overflow-hidden rounded-[10px] bg-[#141418] outline-none ring-1 ring-white/15 transition-[outline-color] hover:outline hover:outline-white/25 focus-visible:outline focus-visible:outline-white/60 disabled:cursor-default"
-          style={{
-            marginTop: HANG,
-            cursor: grabbing ? "grabbing" : undefined,
-            boxShadow: "0 1px 2px rgba(0,0,0,.5), 0 14px 34px -10px rgba(0,0,0,.72)",
-          }}
-          onClick={() => {
-            if (swallowed.current) {
-              swallowed.current = false;
-              return;
-            }
-            if (image.current) onExpand(image.current);
-          }}
+          className="relative"
+          style={
+            fresh ? { animation: "line-drop 320ms cubic-bezier(.22,1,.36,1) both" } : undefined
+          }
         >
-          <img
-            ref={image}
-            src={item.url}
-            alt=""
-            draggable={false}
-            onLoad={() => setLoaded(true)}
-            className="block object-cover"
-            style={{ width: item.w, height: item.h }}
+          <div
+            className="pointer-events-none absolute left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-white/28 to-white/12"
+            style={{ height: HANG }}
           />
-        </button>
+          <svg
+            aria-hidden
+            className="pointer-events-none absolute -top-[3px] left-1/2 -translate-x-1/2 drop-shadow-[0_1px_1px_rgba(0,0,0,0.55)]"
+            width="9"
+            height="17"
+            viewBox="0 0 9 17"
+            fill="none"
+          >
+            <rect
+              x="0.8"
+              y="0.8"
+              width="7.4"
+              height="15.4"
+              rx="2.2"
+              fill="#8a6c4e"
+              stroke="rgba(0,0,0,0.55)"
+            />
+            <rect x="2.2" y="2.2" width="4.6" height="12.6" rx="1.4" fill="#a5845f" />
+            <path d="M4.5 2.4v12.2" stroke="rgba(255,255,255,0.28)" strokeWidth="0.7" />
+          </svg>
+          <button
+            type="button"
+            title="点击展开截图"
+            aria-label="展开截图"
+            disabled={busy || !!item.pending || !loaded}
+            className="block cursor-pointer overflow-hidden rounded-[10px] bg-[#141418] outline-none ring-1 ring-white/15 transition-[outline-color] hover:outline hover:outline-white/25 focus-visible:outline focus-visible:outline-white/60 disabled:cursor-default"
+            style={{
+              marginTop: HANG,
+              cursor: grabbing ? "grabbing" : undefined,
+              boxShadow: "0 1px 2px rgba(0,0,0,.5), 0 14px 34px -10px rgba(0,0,0,.72)",
+            }}
+            onClick={() => {
+              if (swallowed.current) {
+                swallowed.current = false;
+                return;
+              }
+              if (image.current) onExpand(image.current);
+            }}
+          >
+            <img
+              ref={image}
+              src={item.url}
+              alt=""
+              draggable={false}
+              onLoad={() => setLoaded(true)}
+              className="block object-cover"
+              style={{ width: item.w, height: item.h }}
+            />
+          </button>
+        </div>
       </div>
       <div
-        className="capsule absolute left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full px-1 py-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
+        className="capsule absolute flex items-center gap-0.5 rounded-full px-1 py-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
         style={{
+          left: capCenter - left,
+          transform: "translateX(-50%)",
           top: HANG + item.h + 8,
           visibility: busy || grabbing ? "hidden" : undefined,
         }}
@@ -719,11 +873,54 @@ function LinePhoto({
         <IconBtn label="展开截图" onClick={() => image.current && onExpand(image.current)}>
           <Pin size={12} strokeWidth={1.8} />
         </IconBtn>
-        <IconBtn label="取下" onClick={onRemove}>
-          <X size={12} strokeWidth={1.8} />
+        <IconBtn
+          label={confirmDelete ? "再次点击确认删除" : "删除（点两次确认）"}
+          danger={confirmDelete}
+          onClick={() => {
+            if (!confirmDelete) {
+              setConfirmDelete(true);
+              if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+              confirmTimer.current = window.setTimeout(() => setConfirmDelete(false), 2500);
+              return;
+            }
+            setConfirmDelete(false);
+            onRemove();
+          }}
+        >
+          {confirmDelete ? (
+            <Check size={12} strokeWidth={2.2} />
+          ) : (
+            <Trash2 size={12} strokeWidth={1.8} />
+          )}
         </IconBtn>
       </div>
     </div>
+  );
+}
+
+function LineMenuItem({
+  icon: Icon,
+  label,
+  onClick,
+  danger,
+}: {
+  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "flex w-full items-center gap-2 rounded-[7px] px-2 py-[6px] text-left transition-colors " +
+        (danger ? "bg-red-500/15 text-red-200" : "hover:bg-white/[0.07]")
+      }
+    >
+      <Icon size={12} strokeWidth={1.8} />
+      {label}
+    </button>
   );
 }
 
@@ -731,17 +928,23 @@ function IconBtn({
   label,
   children,
   onClick,
+  danger,
 }: {
   label: string;
   children: React.ReactNode;
   onClick: () => void;
+  danger?: boolean;
 }) {
   return (
     <button
       type="button"
       title={label}
       onClick={onClick}
-      className="grid h-6 w-6 place-items-center rounded-full text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white"
+      className={
+        danger
+          ? "grid h-6 w-6 place-items-center rounded-full bg-red-500/80 text-white transition-colors duration-150"
+          : "grid h-6 w-6 place-items-center rounded-full text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white"
+      }
     >
       {children}
     </button>

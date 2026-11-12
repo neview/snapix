@@ -54,7 +54,8 @@ jobs:
           releaseBody: |
             Windows 安装包：`Snapix_*_x64-setup.exe`。
 
-            0.6.2 起内置自动更新：已安装的用户会在设置里看到「发现新版本」，下载后自动校验签名并安装。
+            已安装 0.6.2 及以上的用户会自动收到更新；更早版本请手动安装一次。
+            更新包使用 minisign 签名校验，下载完成后由安装器接管重启。
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

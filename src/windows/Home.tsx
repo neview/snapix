@@ -45,44 +45,71 @@ const NAV: { id: Page; icon: typeof HomeIcon; label: string }[] = [
 export default function Home() {
   const [page, setPage] = useState<Page>("home");
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [focusUpdate, setFocusUpdate] = useState(false);
+  const [checkNonce, setCheckNonce] = useState(0);
 
-  // 启动后静默查一次更新（24 小时节流）；失败不打扰，一小时后再试。
-  // 主窗口即便收在托盘里也会挂载，所以这里检查能覆盖「开机自启后一直不开窗」的情况。
-  useEffect(() => {
+  const runUpdateCheck = useCallback(() => {
     const KEY = "snapix.updateCheckedAt";
     const last = Number(localStorage.getItem(KEY) ?? 0);
-    if (Date.now() - last < 24 * 3600_000) return;
-    const timer = window.setTimeout(() => {
-      checkUpdate()
-        .then((info) => {
-          localStorage.setItem(KEY, String(Date.now()));
-          if (!info) return;
-          setUpdate(info);
-          // 托盘常驻应用：主窗可能一直没打开，用系统通知提醒一次（每个版本只提醒一次）
-          const NOTIFIED = "snapix.updateNotified";
-          if (localStorage.getItem(NOTIFIED) !== info.version) {
-            localStorage.setItem(NOTIFIED, info.version);
-            notifyUser(
-              `发现新版本 v${info.version}，打开 Snapix「设置 → 关于与更新」即可安装`,
-            ).catch(() => {});
-          }
-        })
-        .catch(() => {
-          // 网络 / 404 都按「稍后再试」处理，不要把 24 小时配额用掉
-          localStorage.setItem(KEY, String(Date.now() - 23 * 3600_000));
-        });
-    }, 6000);
-    return () => window.clearTimeout(timer);
+    // 6 小时节流：托盘常驻也能定期发现新版本
+    if (Date.now() - last < 6 * 3600_000) return;
+    checkUpdate()
+      .then((info) => {
+        localStorage.setItem(KEY, String(Date.now()));
+        setUpdate(info);
+        if (!info) return;
+        // 主窗可能一直没打开，用系统通知提醒一次（每个版本只提醒一次）
+        const NOTIFIED = "snapix.updateNotified";
+        if (localStorage.getItem(NOTIFIED) !== info.version) {
+          localStorage.setItem(NOTIFIED, info.version);
+          notifyUser(`发现新版本 v${info.version}，打开 Snapix「设置 → 关于与更新」即可安装`).catch(
+            () => {},
+          );
+        }
+      })
+      .catch(() => {
+        // 网络 / 404 都按「稍后再试」处理，不要把 6 小时配额用掉
+        localStorage.setItem(KEY, String(Date.now() - 5 * 3600_000));
+      });
   }, []);
 
-  // 托盘菜单 → 导航
+  // 启动 6 秒后查一次，之后每 30 分钟看一次是否到了 6 小时窗口。
+  // 自动检查开关从设置里实时读取，关掉后不再发请求。
   useEffect(() => {
-    const un = listen<string>("nav", (e) => {
+    const tick = async () => {
+      try {
+        const s = await getSettings();
+        if (!s.updateCheck) return;
+      } catch {
+        // 读设置失败不阻塞检查，按默认开启处理
+      }
+      runUpdateCheck();
+    };
+    const first = window.setTimeout(() => void tick(), 6000);
+    const timer = window.setInterval(() => void tick(), 30 * 60_000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [runUpdateCheck]);
+
+  // 托盘菜单 → 导航 / 检查更新
+  useEffect(() => {
+    const unNav = listen<string>("nav", (e) => {
       const p = e.payload as Page;
-      if (p === "home" || p === "history" || p === "settings") setPage(p);
+      if (p === "home" || p === "history" || p === "settings") {
+        setFocusUpdate(false);
+        setPage(p);
+      }
+    });
+    const unCheck = listen("update:check", () => {
+      setFocusUpdate(true);
+      setCheckNonce((n) => n + 1);
+      setPage("settings");
     });
     return () => {
-      un.then((f) => f());
+      unNav.then((f) => f());
+      unCheck.then((f) => f());
     };
   }, []);
 
@@ -115,7 +142,10 @@ export default function Home() {
               return (
                 <button
                   key={n.id}
-                  onClick={() => setPage(n.id)}
+                  onClick={() => {
+                    setFocusUpdate(false);
+                    setPage(n.id);
+                  }}
                   title={n.label}
                   className={cn(
                     "flex h-[54px] w-[52px] flex-col items-center justify-center gap-1.5 rounded-xl transition-colors duration-200",
@@ -133,10 +163,18 @@ export default function Home() {
 
           <main className="min-w-0 flex-1">
             {page === "home" && (
-              <Dashboard update={update} onOpenSettings={() => setPage("settings")} />
+              <Dashboard
+                update={update}
+                onOpenSettings={() => {
+                  setFocusUpdate(true);
+                  setPage("settings");
+                }}
+              />
             )}
             {page === "history" && <HistoryPanel />}
-            {page === "settings" && <SettingsPanel />}
+            {page === "settings" && (
+              <SettingsPanel focusUpdate={focusUpdate} checkNonce={checkNonce} />
+            )}
           </main>
         </div>
       </div>

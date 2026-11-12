@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use image::RgbaImage;
 use serde::Serialize;
@@ -70,6 +71,8 @@ pub struct CaptureState {
     frame_seq: AtomicU64,
     /// 抓屏准备中门闩：防止连按快捷键时并发抓屏
     preparing: AtomicBool,
+    /// 本次唤起的起点：用于记录「快捷键 → 遮罩首帧」耗时
+    pub capture_started: Mutex<Option<Instant>>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -163,7 +166,7 @@ pub fn ensure_overlay_windows(app: &AppHandle, count: usize) {
             // 全屏遮罩显示 / 隐藏必须是硬切：DWM 默认的缩放淡出动画会让整屏画面「缩一下」
             match built {
                 Ok(win) => crate::winfx::disable_transitions(&win),
-                Err(e) => eprintln!("[snapix] 遮罩窗 {label} 创建失败: {e}"),
+                Err(e) => log::warn!("遮罩窗 {label} 创建失败: {e}"),
             }
         }
     }
@@ -215,6 +218,7 @@ fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<
     if state.preparing.swap(true, Ordering::SeqCst) {
         return;
     }
+    *lock(&state.capture_started) = Some(Instant::now());
 
     // 主窗口在前台（例如从主窗口点「立即截图」）时先收进托盘，否则会被拍进冻屏帧
     let wait_for_hide = hide_main_for_capture(app);
@@ -234,11 +238,11 @@ fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<
         let monitors = match Monitor::all() {
             Ok(m) if !m.is_empty() => m,
             Ok(_) => {
-                eprintln!("[snapix] 抓屏中止：未枚举到显示器");
+                log::warn!("抓屏中止：未枚举到显示器");
                 return;
             }
             Err(e) => {
-                eprintln!("[snapix] 抓屏中止：枚举显示器失败: {e}");
+                log::warn!("抓屏中止：枚举显示器失败: {e}");
                 return;
             }
         };
@@ -257,13 +261,13 @@ fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<
                 monitor.height(),
                 monitor.scale_factor(),
             ) else {
-                eprintln!("[snapix] 显示器 {i} 几何读取失败，跳过");
+                log::warn!("显示器 {i} 几何读取失败，跳过");
                 continue;
             };
             let image = match monitor.capture_image() {
                 Ok(img) => img,
                 Err(e) => {
-                    eprintln!("[snapix] 显示器 {i} 抓屏失败，跳过: {e}");
+                    log::warn!("显示器 {i} 抓屏失败，跳过: {e}");
                     continue;
                 }
             };
@@ -410,6 +414,11 @@ pub async fn overlay_ready(window: tauri::WebviewWindow, app: AppHandle, frame_i
         .unwrap_or(false);
     if on_cursor_monitor {
         let _ = window.set_focus();
+    }
+    if on_cursor_monitor {
+        if let Some(start) = lock(&state.capture_started).take() {
+            log::info!("遮罩唤起 {} ms", start.elapsed().as_millis());
+        }
     }
 }
 
@@ -1399,7 +1408,7 @@ pub async fn pin_region(
         let (tx, rx) = std::sync::mpsc::channel();
         let pin = create_pin(&app, cropped, Some((abs_x, abs_y)), scale, true, Some(tx))
             .inspect_err(|e| {
-                eprintln!("[snapix] 贴图窗口创建失败: {e}");
+                log::warn!("贴图窗口创建失败: {e}");
                 hide_overlay(&app);
             })?;
         // 贴图页面迟迟不报就绪（加载异常）也要兜底显示并收遮罩，不能让全屏遮罩挂着

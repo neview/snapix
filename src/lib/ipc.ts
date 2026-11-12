@@ -55,6 +55,8 @@ export type Settings = {
   historyLimit: number;
   /** 截图产出自动挂到顶部「晾衣绳」 */
   lineEnabled: boolean;
+  /** 启动后自动检查更新 */
+  updateCheck: boolean;
 };
 
 /** 历史记录条目。 */
@@ -82,6 +84,11 @@ export function cancelCapture() {
 /** 发一条系统通知（如发现新版本）。 */
 export function notifyUser(body: string) {
   return invoke("notify_user", { body });
+}
+
+/** 打开日志目录。 */
+export function openLogDir() {
+  return invoke("open_log_dir");
 }
 
 /** 冻屏图已渲染完毕，通知后端显示遮罩窗。 */
@@ -325,6 +332,11 @@ export function getSettings() {
 
 export function updateSettings(settings: Settings) {
   return invoke("update_settings", { settings });
+}
+
+/** 恢复全部默认设置，返回重置后的快照。 */
+export function resetSettings() {
+  return invoke<Settings>("reset_settings");
 }
 
 /** 弹出目录选择框，返回所选路径。 */
