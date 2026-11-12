@@ -45,6 +45,8 @@ pub struct Settings {
     pub history_limit: u32,
     /// 截图产出是否自动挂到「晾衣绳」
     pub line_enabled: bool,
+    /// 启动后自动检查更新（托盘里的「检查更新」不受此开关影响）
+    pub update_check: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +68,7 @@ impl Default for Settings {
             history_enabled: true,
             history_limit: 200,
             line_enabled: true,
+            update_check: true,
         }
     }
 }
@@ -203,7 +206,7 @@ pub fn apply_hotkeys(app: &AppHandle, s: &Settings) -> Result<(), String> {
 }
 
 #[cfg(desktop)]
-fn apply_autostart(app: &AppHandle, enable: bool) {
+pub(crate) fn apply_autostart(app: &AppHandle, enable: bool) {
     use tauri_plugin_autostart::ManagerExt;
     let m = app.autolaunch();
     let _ = if enable { m.enable() } else { m.disable() };
@@ -315,6 +318,30 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<(), String>
         apply_autostart(&app, settings.autostart);
     }
     Ok(())
+}
+
+/// 恢复默认设置（快捷键 / 保存 / 历史 / 晾衣绳 / 更新开关）。
+/// 快捷键先注册成功再落盘，避免默认键被占用时写出一份起不来的配置。
+#[tauri::command]
+pub fn reset_settings(app: AppHandle) -> Result<Settings, String> {
+    let old = current(&app);
+    let defaults = Settings::default();
+    #[cfg(desktop)]
+    if let Err(e) = apply_hotkeys(&app, &defaults) {
+        let _ = apply_hotkeys(&app, &old);
+        return Err(e);
+    }
+    if let Err(e) = persist(&app, &defaults) {
+        #[cfg(desktop)]
+        let _ = apply_hotkeys(&app, &old);
+        return Err(e);
+    }
+    #[cfg(desktop)]
+    apply_autostart(&app, false);
+    if let Some(st) = app.try_state::<SettingsState>() {
+        *lock(&st.0) = defaults.clone();
+    }
+    Ok(defaults)
 }
 
 /// 录制快捷键期间暂停全局热键，避免误触截图。

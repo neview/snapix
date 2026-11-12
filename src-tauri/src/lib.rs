@@ -78,6 +78,16 @@ fn notify_user(app: AppHandle, body: String) {
     capture::notify(&app, &body);
 }
 
+/// 打开日志目录，方便用户反馈问题时直接取日志。
+#[tauri::command]
+fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -93,6 +103,60 @@ const MAIN_BOTTOM_MARGIN: f64 = 8.0;
 /// 首次显示主窗口：放在光标所在显示器（多屏时即用户正在用的那块，退回主显示器）
 /// 工作区的水平居中、贴近底边处。配置里主窗口为隐藏创建，摆好位置再显示，
 /// 避免先居中出现再跳一下。之后由用户拖动决定位置，托盘再打开时保持不变。
+/// 主窗口上次的几何（独立小文件，不跟设置一起重置）。
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct MainBounds {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+fn main_bounds_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("main-window.json"))
+}
+
+fn load_main_bounds(app: &AppHandle) -> Option<MainBounds> {
+    let b: MainBounds =
+        serde_json::from_slice(&std::fs::read(main_bounds_path(app)?).ok()?).ok()?;
+    // 显示器被拔掉 / 分辨率变了：不要还原到屏幕外
+    let visible = app.available_monitors().ok().is_some_and(|ms| {
+        ms.iter().any(|m| {
+            let p = m.position();
+            let s = m.size();
+            b.x >= p.x && b.y >= p.y && b.x < p.x + s.width as i32 && b.y < p.y + s.height as i32
+        })
+    });
+    visible.then_some(b)
+}
+
+fn save_main_bounds(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) else {
+        return;
+    };
+    let Some(path) = main_bounds_path(app) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let b = MainBounds {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+    };
+    if let Ok(json) = serde_json::to_vec(&b) {
+        let _ = crate::util::write_atomic(&path, &json);
+    }
+}
+
 fn place_main_bottom_center(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -166,6 +230,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let line_clear_i = MenuItem::with_id(app, "line-clear", "清空晾衣绳", true, None::<&str>)?;
     let history_i = MenuItem::with_id(app, "history", "历史记录", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+    let check_update_i = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
     let show_i = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出 Snapix", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -185,6 +250,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             &line_clear_i,
             &history_i,
             &settings_i,
+            &check_update_i,
             &PredefinedMenuItem::separator(app)?,
             &show_i,
             &quit_i,
@@ -218,6 +284,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "line-clear" => line::clear_all(app),
             "history" => show_main_page(app, "history"),
             "settings" => show_main_page(app, "settings"),
+            "check-update" => {
+                show_main_page(app, "settings");
+                let _ = app.emit_to("main", "update:check", ());
+            }
             "show" => show_main(app),
             "quit" => app.exit(0),
             _ => {}
@@ -255,6 +325,25 @@ pub fn run() {
         }));
     }
     let mut builder = builder
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("snapix".into()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .level(log::LevelFilter::Warn)
+                // 依赖库只记 warning，自己的模块保留 info，日志文件才不会被噪声塞满
+                .level_for("tauri_app_lib", log::LevelFilter::Info)
+                .level_for("tauri_app", log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -329,6 +418,8 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 match window.label() {
                     "main" => {
+                        // 收进托盘前记住位置/大小，下次启动还原
+                        save_main_bounds(window.app_handle());
                         api.prevent_close();
                         let _ = window.hide();
                     }
@@ -353,7 +444,7 @@ pub fn run() {
         builder = builder
             .plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                None,
+                Some(vec!["--autostart"]),
             ))
             .plugin(
                 tauri_plugin_global_shortcut::Builder::new()
@@ -405,14 +496,24 @@ pub fn run() {
 
         builder = builder.setup(move |app| {
             let handle = app.handle();
+            let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
+            log::info!(
+                "Snapix {} 启动（自启={launched_by_autostart}）",
+                env!("CARGO_PKG_VERSION")
+            );
 
             // 加载设置并注册全局快捷键
             let loaded = settings::load(handle);
             *lock(&app.state::<settings::SettingsState>().0) = loaded.clone();
             if let Err(e) = settings::apply_hotkeys(handle, &loaded) {
                 // 被其他软件占用等情况：不能静默，否则用户只会觉得「快捷键坏了」
-                eprintln!("[snapix] 快捷键注册失败: {e}");
+                log::warn!("快捷键注册失败: {e}");
                 capture::notify(handle, &format!("{e}，请到「设置 → 快捷键」重新设置"));
+            }
+            // 老版本注册的自启项没有 --autostart 参数，这里重写一次
+            #[cfg(desktop)]
+            if loaded.autostart {
+                settings::apply_autostart(handle, true);
             }
 
             history::load(handle);
@@ -424,8 +525,20 @@ pub fn run() {
             let monitor_count = xcap::Monitor::all().map(|m| m.len()).unwrap_or(1);
             capture::ensure_overlay_windows(handle, monitor_count.max(1));
 
-            place_main_bottom_center(handle);
-            show_main(handle);
+            // 有保存过的主窗几何就还原；否则首次运行放屏幕底部居中。
+            match load_main_bounds(handle) {
+                Some(b) => {
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let _ = win.set_position(tauri::PhysicalPosition::new(b.x, b.y));
+                        let _ = win.set_size(tauri::PhysicalSize::new(b.w, b.h));
+                    }
+                }
+                None => place_main_bottom_center(handle),
+            }
+            // 开机自启静默进托盘，不抢焦点弹窗
+            if !launched_by_autostart {
+                show_main(handle);
+            }
             Ok(())
         });
     }
@@ -435,6 +548,7 @@ pub fn run() {
             start_capture,
             cancel_capture,
             notify_user,
+            open_log_dir,
             capture::overlay_ready,
             capture::overlay_fetch,
             capture::overlay_claim,
@@ -477,6 +591,7 @@ pub fn run() {
             gifrec::gif_record_cancel,
             settings::get_settings,
             settings::update_settings,
+            settings::reset_settings,
             settings::pick_folder,
             settings::hotkeys_suspend,
             settings::hotkeys_resume,
@@ -513,12 +628,13 @@ pub fn run() {
         .expect("error while building tauri application");
 
     // 记录退出原因（诊断偶发的非零退出码）
-    app.run(|_app, event| match &event {
+    app.run(|app, event| match &event {
         tauri::RunEvent::ExitRequested { code, .. } => {
-            eprintln!("[snapix] exit requested, code={code:?}");
+            log::info!("exit requested, code={code:?}");
         }
         tauri::RunEvent::Exit => {
-            eprintln!("[snapix] event loop exited");
+            save_main_bounds(app);
+            log::info!("event loop exited");
         }
         _ => {}
     });

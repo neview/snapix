@@ -14,9 +14,11 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
   getSettings,
   updateSettings,
+  resetSettings,
   pickFolder,
   hotkeysSuspend,
   hotkeysResume,
+  openLogDir,
   type Settings,
 } from "@/lib/ipc";
 import {
@@ -28,14 +30,58 @@ import {
 } from "@/lib/updater";
 import { cn } from "@/lib/cn";
 
-export default function SettingsPanel() {
+export default function SettingsPanel({
+  focusUpdate = false,
+  checkNonce = 0,
+}: {
+  focusUpdate?: boolean;
+  checkNonce?: number;
+}) {
   const [s, setS] = useState<Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  const updateRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<number | null>(null);
+  const resetTimer = useRef<number | null>(null);
 
   useEffect(() => {
     getSettings().then(setS);
   }, []);
+
+  // 从首页「新版本」/ 托盘「检查更新」进来时，直接滚到更新区并闪一下边框
+  useEffect(() => {
+    if (!focusUpdate) return;
+    const scroll = window.setTimeout(
+      () => updateRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }),
+      80,
+    );
+    return () => window.clearTimeout(scroll);
+  }, [focusUpdate]);
+
+  useEffect(
+    () => () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      if (resetTimer.current) window.clearTimeout(resetTimer.current);
+    },
+    [],
+  );
+
+  const onReset = async () => {
+    if (!resetArmed) {
+      setResetArmed(true);
+      if (resetTimer.current) window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setResetArmed(false), 2500);
+      return;
+    }
+    setResetArmed(false);
+    try {
+      const next = await resetSettings();
+      setS(next);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   /** 更新并防抖持久化；快捷键注册失败时回显错误并还原。 */
   const patch = (p: Partial<Settings>) => {
@@ -193,15 +239,58 @@ export default function SettingsPanel() {
         <Row label="开机自启" hint="登录 Windows 后静默启动到托盘">
           <Toggle checked={s.autostart} onChange={(v) => patch({ autostart: v })} />
         </Row>
+        <Row label="打开日志目录" hint="反馈问题时可附上 snapix.log，便于定位">
+          <button
+            onClick={() => openLogDir().catch((e) => setError(String(e)))}
+            className="inline-flex h-7 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 text-[11px] text-white/70 transition-colors hover:bg-white/[0.09] hover:text-white"
+          >
+            <FolderOpen size={11} />
+            打开
+          </button>
+        </Row>
+        <Row label="恢复默认设置" hint="快捷键、保存、历史、晾衣绳与更新开关全部回到初始值">
+          <button
+            onClick={onReset}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors",
+              resetArmed
+                ? "border-red-400/40 bg-red-400/15 text-red-200"
+                : "border-white/10 bg-white/[0.05] text-white/70 hover:bg-white/[0.09] hover:text-white",
+            )}
+          >
+            <RotateCcw size={11} />
+            {resetArmed ? "确认恢复?" : "恢复默认"}
+          </button>
+        </Row>
       </Section>
 
-      <UpdateSection />
+      <div
+        ref={updateRef}
+        className={cn(
+          "rounded-[16px] transition-shadow duration-300",
+          focusUpdate && "ring-2 ring-white/15",
+        )}
+      >
+        <UpdateSection
+          updateCheck={s.updateCheck}
+          onUpdateCheck={(v) => patch({ updateCheck: v })}
+          checkNonce={checkNonce}
+        />
+      </div>
     </div>
   );
 }
 
 /** 关于与更新：版本号 + 手动检查 + 下载安装（Windows 安装器会接管重启）。 */
-function UpdateSection() {
+function UpdateSection({
+  updateCheck,
+  onUpdateCheck,
+  checkNonce,
+}: {
+  updateCheck: boolean;
+  onUpdateCheck: (v: boolean) => void;
+  checkNonce: number;
+}) {
   const [version, setVersion] = useState("");
   const [update, setUpdate] = useState<UpdateInfo | null>(() => cachedUpdate());
   const [checking, setChecking] = useState(false);
@@ -245,6 +334,17 @@ function UpdateSection() {
     }
   };
 
+  // 托盘「检查更新」：nonce 变化时自动跑一次
+  const lastNonce = useRef(0);
+  useEffect(() => {
+    if (checkNonce > 0 && checkNonce !== lastNonce.current) {
+      lastNonce.current = checkNonce;
+      void onCheck();
+    }
+    // onCheck 每次渲染都是新函数，这里只认 nonce 的变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkNonce]);
+
   const percent =
     progress.total && progress.total > 0
       ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
@@ -252,6 +352,9 @@ function UpdateSection() {
 
   return (
     <Section icon={RefreshCw} title="关于与更新">
+      <Row label="启动时自动检查" hint="每 6 小时最多检查一次；托盘「检查更新」始终可用">
+        <Toggle checked={updateCheck} onChange={onUpdateCheck} />
+      </Row>
       <Row label="当前版本" hint="通过 GitHub Releases 获取更新，下载后校验签名再安装">
         <div className="flex items-center gap-2.5">
           <span className="text-[11.5px] tabular-nums text-white/40">
@@ -278,7 +381,7 @@ function UpdateSection() {
               </div>
               {update.notes && (
                 <p className="mt-1.5 max-h-28 overflow-y-auto whitespace-pre-wrap text-[10.5px] leading-relaxed text-white/32">
-                  {update.notes}
+                  {plainNotes(update.notes)}
                 </p>
               )}
               <div className="mt-2.5 flex items-center gap-2.5">
@@ -318,6 +421,15 @@ function UpdateSection() {
 }
 
 /* ===================== 小组件 ===================== */
+
+/** Release 的 notes 是 Markdown，这里只做轻量去标记，避免把反引号/星号直接露给用户。 */
+function plainNotes(text: string) {
+  return text
+    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ""))
+    .replace(/[*_`>#]/g, "")
+    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+    .trim();
+}
 
 function Section({
   icon: Icon,

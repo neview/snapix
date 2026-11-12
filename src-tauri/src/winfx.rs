@@ -23,10 +23,7 @@ pub fn disable_transitions(window: &tauri::WebviewWindow) {
         )
     };
     if let Err(e) = r {
-        eprintln!(
-            "[snapix] 关闭窗口 {} 的 DWM 过渡动画失败: {e}",
-            window.label()
-        );
+        log::warn!("关闭窗口 {} 的 DWM 过渡动画失败: {e}", window.label());
     }
 }
 
