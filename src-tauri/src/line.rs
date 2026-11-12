@@ -271,7 +271,7 @@ pub fn load(app: &AppHandle) {
         *lock(&st.items) = alive;
     }
     if crate::settings::current(app).line_enabled {
-        crate::capture::prewarm_pin(app);
+        crate::pin::prewarm_pin(app);
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
             // 即使空绳也预热隐藏 WebView，让首次飞行不再承担冷启动。
@@ -1032,7 +1032,7 @@ fn prepare_detach_now(
             }
             return Ok(());
         }
-        let label = crate::capture::reserve_deferred_pin_label(app);
+        let label = crate::pin::reserve_deferred_pin_label(app);
         detaches.insert(
             id.clone(),
             DetachPreparation {
@@ -1044,7 +1044,7 @@ fn prepare_detach_now(
         );
         label
     };
-    if let Some(pin_state) = app.try_state::<crate::capture::PinState>() {
+    if let Some(pin_state) = app.try_state::<crate::pin::PinState>() {
         lock(&pin_state.line_returns).insert(label.clone(), return_slot);
     }
     let timeout_app = app.clone();
@@ -1075,7 +1075,7 @@ fn prepare_detach_now(
                     return Err("贴图准备已取消".into());
                 }
                 // 取消、建窗和显示全部在主线程排队，检查与建窗之间不会插入取消。
-                crate::capture::create_deferred_pin_now(app, create_label, img, rect, ready_tx)?;
+                crate::pin::create_deferred_pin_now(app, create_label, img, rect, ready_tx)?;
                 Ok(())
             })?;
             ready_rx
@@ -1133,7 +1133,7 @@ pub async fn line_reveal_detach(app: AppHandle, id: String, label: String) -> Re
             if phase != DetachPhase::Ready {
                 return Err("贴图尚未准备好".into());
             }
-            if let Err(e) = crate::capture::reveal_pin_now(app, &label) {
+            if let Err(e) = crate::pin::reveal_pin_now(app, &label) {
                 let _ = cancel_detach_now(app, &id, Some(&label), &e);
                 return Err(e);
             }
@@ -1165,7 +1165,7 @@ pub async fn line_finish_detach(app: AppHandle, id: String, label: String) -> Re
             }
             lock(&st.detaches).remove(&id);
             remove_entry(app, &id);
-            crate::capture::prewarm_pin(app);
+            crate::pin::prewarm_pin(app);
             log::info!("detach 完成 id={id}");
             Ok(())
         })
@@ -1221,9 +1221,9 @@ fn cancel_detach_now(
         let _ = tx.send(Err(reason.to_string()));
     }
     // 若还在读图，后来的创建会看到事务失效；若已建窗，则此处立即关掉。
-    crate::capture::close_pin_now(app, &label)?;
+    crate::pin::close_pin_now(app, &label)?;
     lock(&st.detaches).remove(id);
-    crate::capture::prewarm_pin(app);
+    crate::pin::prewarm_pin(app);
     Ok(())
 }
 
@@ -1331,7 +1331,7 @@ pub async fn line_save(
 pub async fn line_pin(app: AppHandle, id: String) -> Result<(), String> {
     blocking(move || {
         let img = load_image(&app, &id)?;
-        crate::capture::spawn_pin(&app, img, None, 1.0)
+        crate::pin::spawn_pin(&app, img, None, 1.0)
     })
     .await
 }
@@ -1395,7 +1395,7 @@ pub async fn line_return_pin(app: AppHandle, label: String) -> Result<bool, Stri
 /// 主线程：校验贴图来源、读窗口几何、算出落点。不做任何写盘 / 建窗之外的慢活。
 fn prepare_return(app: &AppHandle, label: &str) -> Result<ReturnPrep, String> {
     let pin_state = app
-        .try_state::<crate::capture::PinState>()
+        .try_state::<crate::pin::PinState>()
         .ok_or("贴图状态缺失")?;
     let slot = *lock(&pin_state.line_returns)
         .get(label)
@@ -1511,7 +1511,7 @@ pub async fn line_return_takeoff(app: AppHandle, id: String, label: String) -> R
             if !known {
                 return Err("挂回事务已结束".into());
             }
-            let _ = crate::capture::close_pin_now(app, &label);
+            let _ = crate::pin::close_pin_now(app, &label);
             Ok(())
         })
     })
@@ -1544,8 +1544,8 @@ fn finish_return(app: &AppHandle, id: &str, label: &str) {
         return;
     }
     clear_pending(app, id);
-    let _ = crate::capture::close_pin_now(app, label);
-    crate::capture::prewarm_pin(app);
+    let _ = crate::pin::close_pin_now(app, label);
+    crate::pin::prewarm_pin(app);
     notify(app, None);
 }
 

@@ -345,7 +345,7 @@ pub fn preview_bytes(app: &AppHandle, id: &str) -> Option<Vec<u8>> {
 pub async fn history_pin(app: AppHandle, id: String) -> Result<(), String> {
     blocking(move || {
         let img = load_image(&app, &id)?;
-        crate::capture::spawn_pin(&app, img, None, 1.0)
+        crate::pin::spawn_pin(&app, img, None, 1.0)
     })
     .await
 }
@@ -354,7 +354,7 @@ pub async fn history_pin(app: AppHandle, id: String) -> Result<(), String> {
 pub async fn history_edit(app: AppHandle, id: String) -> Result<(), String> {
     blocking(move || {
         let img = load_image(&app, &id)?;
-        crate::capture::open_editor_image(&app, img)
+        crate::editor::open_editor_image(&app, img)
     })
     .await
 }

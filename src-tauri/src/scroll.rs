@@ -4,6 +4,9 @@
 //! 「注入滚轮 → 等待渲染 → 抓取区域 → 与上一帧匹配位移 → 追加新内容」，
 //! 触底（连续多帧无位移）/ 匹配失败 / 达到上限 / 用户点完成 时装配长图进编辑器。
 //!
+//! 纵向与横向共用同一套算法：横向时把每帧转置后再拼接，装配完再转置回来
+//! （见 `transpose`），因此位移搜索、表头表尾剔除、触底判定都只有一份实现。
+//!
 //! 拼接算法：每行取 48 个采样点的灰度签名；
 //! 首对帧检测「固定表头/表尾」（粘性导航栏等，逐行相同则排除），
 //! 之后在内容带上搜索使 SAD 最小的垂直位移 dy，追加帧尾 dy 行新内容。
@@ -56,9 +59,39 @@ pub fn is_active(app: &AppHandle) -> bool {
 struct Progress {
     height_px: u32,
     frames: u32,
+    horizontal: bool,
 }
 
 // ===================== 行签名与匹配 =====================
+
+/// 滚动方向。纵向直接按行处理；横向把帧转置后同样按行处理。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+/// 转置一张图（`w×h` → `h×w`）。分块拷贝，避免逐像素跨行跳着写缓存。
+fn transpose(img: &RgbaImage) -> RgbaImage {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let src = img.as_raw();
+    let mut buf = vec![0u8; src.len()];
+    const BLOCK: usize = 16;
+    for by in (0..h).step_by(BLOCK) {
+        for bx in (0..w).step_by(BLOCK) {
+            let y1 = (by + BLOCK).min(h);
+            let x1 = (bx + BLOCK).min(w);
+            for y in by..y1 {
+                for x in bx..x1 {
+                    let s = (y * w + x) * 4;
+                    let d = (x * h + y) * 4;
+                    buf[d..d + 4].copy_from_slice(&src[s..s + 4]);
+                }
+            }
+        }
+    }
+    RgbaImage::from_raw(h as u32, w as u32, buf).unwrap_or_else(|| img.clone())
+}
 
 type RowSig = [u8; SIG_COLS];
 
@@ -98,6 +131,8 @@ enum Push {
 }
 
 struct Stitcher {
+    /// 拼接方向；横向时内部一切都是转置后的坐标系
+    axis: Axis,
     w: u32,
     h: u32,
     /// 固定表头 / 表尾行数（首对滚动帧上确定一次）
@@ -112,9 +147,15 @@ struct Stitcher {
 }
 
 impl Stitcher {
-    fn new(first: RgbaImage) -> Self {
+    fn new(first: RgbaImage, axis: Axis) -> Self {
+        let first = if axis == Axis::Horizontal {
+            transpose(&first)
+        } else {
+            first
+        };
         let sig = signatures(&first);
         Self {
+            axis,
             w: first.width(),
             h: first.height(),
             hdr: 0,
@@ -142,6 +183,14 @@ impl Stitcher {
     }
 
     fn push(&mut self, img: &RgbaImage) -> Push {
+        // 横向滚动：转置到纵向坐标系，后面全按行处理
+        let turned;
+        let img = if self.axis == Axis::Horizontal {
+            turned = transpose(img);
+            &turned
+        } else {
+            img
+        };
         if img.width() != self.w || img.height() != self.h {
             return Push::Fail;
         }
@@ -261,7 +310,12 @@ impl Stitcher {
         buf.extend_from_slice(&self.extra);
         buf.extend_from_slice(&self.last.as_raw()[body_h * w4..]);
 
-        RgbaImage::from_raw(self.w, total_h as u32, buf).unwrap_or(self.base)
+        let out = RgbaImage::from_raw(self.w, total_h as u32, buf).unwrap_or(self.base);
+        if self.axis == Axis::Horizontal {
+            transpose(&out)
+        } else {
+            out
+        }
     }
 }
 
@@ -363,6 +417,30 @@ fn send_wheel(notches: i32) {
     }
 }
 
+/// 横向滚轮（MOUSEEVENTF_HWHEEL）：正数向右，与纵向的正负方向相反。
+#[cfg(windows)]
+fn send_wheel_h(notches: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEINPUT,
+    };
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: (notches * 120) as u32,
+                dwFlags: MOUSEEVENTF_HWHEEL,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
 #[cfg(not(windows))]
 fn cursor_pos() -> Option<(i32, i32)> {
     None
@@ -371,6 +449,8 @@ fn cursor_pos() -> Option<(i32, i32)> {
 fn set_cursor(_x: i32, _y: i32) {}
 #[cfg(not(windows))]
 fn send_wheel(_notches: i32) {}
+#[cfg(not(windows))]
+fn send_wheel_h(_notches: i32) {}
 
 // ===================== 辅助窗口 =====================
 
@@ -477,11 +557,19 @@ fn sleep_signal(state: &ScrollState, total_ms: u64) -> u8 {
     state.signal.load(Ordering::SeqCst)
 }
 
-fn emit_progress(app: &AppHandle, height_px: u32, frames: u32) {
-    let _ = app.emit_to(CTL_LABEL, "scroll:progress", Progress { height_px, frames });
+fn emit_progress(app: &AppHandle, height_px: u32, frames: u32, axis: Axis) {
+    let _ = app.emit_to(
+        CTL_LABEL,
+        "scroll:progress",
+        Progress {
+            height_px,
+            frames,
+            horizontal: axis == Axis::Horizontal,
+        },
+    );
 }
 
-fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: SessionGuard) {
+fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: SessionGuard, axis: Axis) {
     let state = app.state::<ScrollState>();
     let center = (
         origin.0 + rect.x + rect.w as i32 / 2,
@@ -489,10 +577,15 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
     );
     let saved_cursor = cursor_pos();
 
-    // 依区域高度自适应滚动力度，保证足够重叠
-    let notches = if rect.h > 900 {
+    // 依选区在滚动方向上的长度自适应滚动力度，保证足够重叠
+    let span = if axis == Axis::Horizontal {
+        rect.w
+    } else {
+        rect.h
+    };
+    let notches = if span > 900 {
         3
-    } else if rect.h > 450 {
+    } else if span > 450 {
         2
     } else {
         1
@@ -507,11 +600,11 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
 
     let result: Option<Stitcher> = (|| {
         let first = capture_region(origin, rect).ok()?;
-        let mut stitcher = Stitcher::new(first);
+        let mut stitcher = Stitcher::new(first, axis);
         let mut frames = 1u32;
         let mut still = 0u32;
         let mut fails = 0u32;
-        emit_progress(&app, stitcher.total_height(), frames);
+        emit_progress(&app, stitcher.total_height(), frames, axis);
 
         loop {
             if state.signal.load(Ordering::SeqCst) == SIG_CANCEL {
@@ -522,7 +615,10 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
             }
 
             set_cursor(center.0, center.1);
-            send_wheel(notches);
+            match axis {
+                Axis::Vertical => send_wheel(notches),
+                Axis::Horizontal => send_wheel_h(notches),
+            }
             if sleep_signal(&state, 340) == SIG_CANCEL {
                 return None;
             }
@@ -536,7 +632,7 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
                 Push::Moved(_) => {
                     still = 0;
                     fails = 0;
-                    emit_progress(&app, stitcher.total_height(), frames);
+                    emit_progress(&app, stitcher.total_height(), frames, axis);
                 }
                 Push::Still => {
                     still += 1;
@@ -566,7 +662,7 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
 
     if let Some(stitcher) = result {
         let img = stitcher.assemble();
-        if let Err(e) = capture::open_editor_image(&app, img) {
+        if let Err(e) = crate::editor::open_editor_image(&app, img) {
             capture::notify(&app, &format!("滚动截图完成，但无法打开编辑器：{e}"));
         }
     }
@@ -585,10 +681,11 @@ pub async fn scroll_capture_start(
     y: i32,
     width: u32,
     height: u32,
+    horizontal: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(not(windows))]
     {
-        let _ = (window, x, y, width, height);
+        let _ = (window, x, y, width, height, horizontal);
         return Err("滚动截图目前仅支持 Windows".into());
     }
 
@@ -630,8 +727,13 @@ pub async fn scroll_capture_start(
             scale.max(0.1) as f64,
         );
 
+        let axis = if horizontal.unwrap_or(false) {
+            Axis::Horizontal
+        } else {
+            Axis::Vertical
+        };
         let app2 = app.clone();
-        std::thread::spawn(move || run_session(app2, origin, rect, guard));
+        std::thread::spawn(move || run_session(app2, origin, rect, guard, axis));
         Ok(())
     }
 }
@@ -673,7 +775,7 @@ mod tests {
     fn stitch_scrolling_page() {
         let page = make_page(300, 3000);
         let vh = 600;
-        let mut st = Stitcher::new(viewport(&page, 0, vh));
+        let mut st = Stitcher::new(viewport(&page, 0, vh), Axis::Vertical);
 
         let mut top = 0;
         for _ in 0..10 {
@@ -696,7 +798,7 @@ mod tests {
     fn detects_bottom() {
         let page = make_page(300, 1200);
         let vh = 600;
-        let mut st = Stitcher::new(viewport(&page, 0, vh));
+        let mut st = Stitcher::new(viewport(&page, 0, vh), Axis::Vertical);
         assert!(matches!(
             st.push(&viewport(&page, 300, vh)),
             Push::Moved(300)
@@ -717,7 +819,7 @@ mod tests {
             image::imageops::replace(&mut v, &header, 0, 0);
             v
         };
-        let mut st = Stitcher::new(compose(0));
+        let mut st = Stitcher::new(compose(0), Axis::Vertical);
         match st.push(&compose(150)) {
             Push::Moved(dy) => assert_eq!(dy, 150),
             _ => panic!("应识别滚动并剔除表头"),
@@ -725,5 +827,67 @@ mod tests {
         assert_eq!(st.hdr, hdr_h);
         let out = st.assemble();
         assert_eq!(out.height(), vh + 150);
+    }
+
+    #[test]
+    fn transpose_is_involutive() {
+        let page = make_page(37, 53);
+        let back = transpose(&transpose(&page));
+        assert_eq!(back.dimensions(), page.dimensions());
+        assert_eq!(back.as_raw(), page.as_raw());
+    }
+
+    /// 横向页面：每列纹理都不同，模拟宽表格向右滚动。
+    fn make_wide(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            let mut s = x.wrapping_mul(2654435761).rotate_left(7);
+            s ^= s >> 11;
+            let v = (s & 0xFF) as u8;
+            let u = ((y * 5 + (y / 7) * 13) % 251) as u8;
+            image::Rgba([v, v.wrapping_add(u), v ^ u, 255])
+        })
+    }
+
+    fn viewport_x(page: &RgbaImage, left: u32, w: u32, h: u32) -> RgbaImage {
+        image::imageops::crop_imm(page, left, 0, w, h).to_image()
+    }
+
+    #[test]
+    fn stitch_horizontal_page() {
+        let page = make_wide(3000, 320);
+        let (vw, vh) = (600u32, 320u32);
+        let mut st = Stitcher::new(viewport_x(&page, 0, vw, vh), Axis::Horizontal);
+
+        let mut left = 0;
+        for _ in 0..10 {
+            left += 173;
+            match st.push(&viewport_x(&page, left, vw, vh)) {
+                Push::Moved(d) => assert_eq!(d, 173),
+                _ => panic!("应识别为横向滚动"),
+            }
+        }
+
+        let out = st.assemble();
+        assert_eq!(out.width(), vw + 173 * 10);
+        assert_eq!(out.height(), vh);
+        let expect = viewport_x(&page, 0, vw + 173 * 10, vh);
+        assert_eq!(out.as_raw(), expect.as_raw());
+    }
+
+    #[test]
+    fn horizontal_detects_right_edge() {
+        let page = make_wide(700, 200);
+        let (vw, vh) = (400u32, 200u32);
+        let mut st = Stitcher::new(viewport_x(&page, 0, vw, vh), Axis::Horizontal);
+        // 滚到最右：300..700
+        assert!(matches!(
+            st.push(&viewport_x(&page, 300, vw, vh)),
+            Push::Moved(300)
+        ));
+        // 到边后画面不再变化
+        assert!(matches!(
+            st.push(&viewport_x(&page, 300, vw, vh)),
+            Push::Still
+        ));
     }
 }

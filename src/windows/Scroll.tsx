@@ -57,7 +57,7 @@ function Ctl() {
 
         <div data-tauri-drag-region className="min-w-0 flex-1 leading-tight">
           <div data-tauri-drag-region className="text-[12px] font-medium text-ink-100">
-            滚动截图中
+            {progress?.horizontal ? "横向滚动截图中" : "滚动截图中"}
             {progress && (
               <span className="ml-1.5 tabular-nums text-brand-300">
                 {progress.heightPx.toLocaleString()} px
@@ -66,7 +66,9 @@ function Ctl() {
           </div>
           <div data-tauri-drag-region className="flex items-center gap-1 text-[10px] text-ink-400">
             <MousePointerClick size={10} />
-            自动滚动拼接 · 触底自动完成
+            {progress?.horizontal
+              ? "自动向右滚动拼接 · 到边自动完成"
+              : "自动滚动拼接 · 触底自动完成"}
           </div>
         </div>
 

@@ -1,9 +1,12 @@
 mod capture;
+mod cursor;
+mod editor;
 mod fastimg;
 mod gifrec;
 mod history;
 mod line;
 mod ocr;
+mod pin;
 mod scroll;
 mod settings;
 mod snap;
@@ -269,17 +272,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "delay-5" => capture::capture_delayed_impl(app.clone(), 5),
             "delay-10" => capture::capture_delayed_impl(app.clone(), 10),
             "pin-clip" => {
-                if let Err(e) = capture::pin_clipboard_impl(app) {
+                if let Err(e) = pin::pin_clipboard_impl(app) {
                     capture::notify(app, &e);
                 }
             }
             "edit-clip" => {
-                if let Err(e) = capture::edit_clipboard_impl(app) {
+                if let Err(e) = pin::edit_clipboard_impl(app) {
                     capture::notify(app, &e);
                 }
             }
-            "toggle-pins" => capture::toggle_pins(app.clone()),
-            "pins-unthrough" => capture::pins_passthrough_off(app.clone()),
+            "toggle-pins" => pin::toggle_pins(app.clone()),
+            "pins-unthrough" => pin::pins_passthrough_off(app.clone()),
             "line-toggle" => line::toggle(app),
             "line-clear" => line::clear_all(app),
             "history" => show_main_page(app, "history"),
@@ -350,8 +353,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(capture::CaptureState::default())
-        .manage(capture::PinState::default())
-        .manage(capture::EditorState::default())
+        .manage(pin::PinState::default())
+        .manage(editor::EditorState::default())
         .manage(settings::SettingsState::default())
         .manage(history::HistoryState::default())
         .manage(line::LineState::default())
@@ -385,10 +388,10 @@ pub fn run() {
                     "editor" => (
                         rest.parse()
                             .ok()
-                            .and_then(|id| capture::editor_bmp(&app, id)),
+                            .and_then(|id| editor::editor_bmp(&app, id)),
                         "image/bmp",
                     ),
-                    "pin" => (capture::pin_bmp(&app, &rest), "image/bmp"),
+                    "pin" => (pin::pin_bmp(&app, &rest), "image/bmp"),
                     "history" => (history::preview_bytes(&app, &rest), "image/png"),
                     "line" => (line::preview_bytes(&app, &rest), "image/png"),
                     _ => (None, "application/octet-stream"),
@@ -412,8 +415,9 @@ pub fn run() {
                 responder.respond(response);
             });
         })
-        // 无边框窗口仍会收到 Alt+F4 / 任务栏关闭：main 与 editor 是预创建的单实例窗口，
-        // 真正销毁后托盘「打开主窗口」与「标注」都会静默失效，因此拦截为隐藏。
+        // 无边框窗口仍会收到 Alt+F4 / 任务栏关闭：main 是预创建的单实例窗口，
+        // editor 是首次标注时创建后复用的；真正销毁后托盘「打开主窗口」与「标注」
+        // 都会静默失效（editor 销毁还能重建，但会丢掉当前标注图），因此一律拦截为隐藏。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 match window.label() {
@@ -425,7 +429,7 @@ pub fn run() {
                     }
                     "editor" => {
                         api.prevent_close();
-                        capture::close_editor_impl(window.app_handle());
+                        editor::close_editor_impl(window.app_handle());
                     }
                     // 滚动 / 录制控制条被 Alt+F4 或任务栏关闭：必须同时结束会话。
                     // 否则后台线程会继续往屏幕上注入滚轮、持续抓帧直到自然超时，
@@ -467,7 +471,7 @@ pub fn run() {
                         }
                         if let Ok(sc) = settings::parse_shortcut(&s.hotkey_pin_clip) {
                             if shortcut == &sc {
-                                if let Err(e) = capture::pin_clipboard_impl(app) {
+                                if let Err(e) = pin::pin_clipboard_impl(app) {
                                     capture::notify(app, &e);
                                 }
                                 return;
@@ -487,7 +491,7 @@ pub fn run() {
                         }
                         if let Ok(sc) = settings::parse_shortcut(&s.hotkey_toggle_pins) {
                             if shortcut == &sc {
-                                capture::toggle_pins(app.clone());
+                                pin::toggle_pins(app.clone());
                             }
                         }
                     })
@@ -559,29 +563,31 @@ pub fn run() {
             capture::copy_region,
             capture::copy_to_line,
             capture::save_region,
-            capture::open_editor,
-            capture::copy_image,
-            capture::save_image,
-            capture::close_editor,
-            capture::pin_region,
-            capture::pin_ready,
-            capture::get_pin_image,
-            capture::pin_copy,
-            capture::pin_save,
-            capture::pin_rotate,
-            capture::pin_flip,
-            capture::pin_passthrough,
-            capture::pins_passthrough_off,
-            capture::pin_annotate,
-            capture::pin_data,
-            capture::close_pin,
-            capture::pin_clipboard,
-            capture::edit_clipboard,
-            capture::toggle_pins,
+            editor::open_editor,
+            editor::copy_image,
+            editor::save_image,
+            editor::close_editor,
+            pin::pin_region,
+            pin::pin_ready,
+            pin::get_pin_image,
+            pin::pin_copy,
+            pin::pin_save,
+            pin::pin_rotate,
+            pin::pin_flip,
+            pin::pin_passthrough,
+            pin::pins_passthrough_off,
+            pin::pin_annotate,
+            pin::pin_data,
+            pin::close_pin,
+            pin::pin_clipboard,
+            pin::edit_clipboard,
+            pin::toggle_pins,
             capture::copy_text,
             capture::ocr_region,
             capture::qr_region,
-            capture::editor_detect_privacy,
+            editor::editor_detect_privacy,
+            editor::editor_ready,
+            editor::editor_pending,
             uia::element_at,
             scroll::scroll_capture_start,
             scroll::scroll_capture_stop,

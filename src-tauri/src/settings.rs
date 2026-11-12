@@ -47,6 +47,8 @@ pub struct Settings {
     pub line_enabled: bool,
     /// 启动后自动检查更新（托盘里的「检查更新」不受此开关影响）
     pub update_check: bool,
+    /// 截图是否把鼠标光标一起拍进去
+    pub capture_cursor: bool,
 }
 
 impl Default for Settings {
@@ -69,6 +71,7 @@ impl Default for Settings {
             history_limit: 200,
             line_enabled: true,
             update_check: true,
+            capture_cursor: false,
         }
     }
 }
