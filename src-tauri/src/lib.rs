@@ -406,12 +406,22 @@ pub fn run() {
                     builder = builder.header("Access-Control-Allow-Origin", origin);
                 }
                 let response = match body {
-                    // URL 均带唯一 id，可安全缓存（放大镜 CSS 背景与 <img> 共用同一帧）
-                    Some(bytes) => builder
-                        .header("Content-Type", mime)
-                        .header("Cache-Control", "private, max-age=300")
-                        .body(bytes)
-                        .unwrap(),
+                    // 大图（冻屏帧 / 编辑图 / 贴图）都是未压缩 BMP：4K 一张 33MB。
+                    // 冻屏帧给 30s 是让放大镜的 CSS 背景与 <img> 复用同一份；
+                    // 编辑图 / 贴图只取一次，直接不缓存，免得浏览器把几十 MB 留在内存或磁盘里。
+                    // 缩略图（history / line）是小 PNG，可以放心缓存。
+                    Some(bytes) => {
+                        let cache = match kind.as_str() {
+                            "history" | "line" => "private, max-age=300",
+                            "frame" => "private, max-age=30",
+                            _ => "no-store",
+                        };
+                        builder
+                            .header("Content-Type", mime)
+                            .header("Cache-Control", cache)
+                            .body(bytes)
+                            .unwrap()
+                    }
                     None => builder.status(404).body(Vec::new()).unwrap(),
                 };
                 responder.respond(response);
@@ -598,6 +608,8 @@ pub fn run() {
             scroll::scroll_capture_start,
             scroll::scroll_capture_stop,
             scroll::scroll_capture_cancel,
+            scroll::scroll_capture_set_paused,
+            scroll::scroll_capture_step,
             gifrec::gif_record_start,
             gifrec::gif_record_stop,
             gifrec::gif_record_cancel,

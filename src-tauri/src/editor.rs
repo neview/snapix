@@ -211,6 +211,9 @@ pub async fn editor_detect_privacy(app: AppHandle) -> Result<Vec<SelRect>, Strin
 /// 隐藏编辑器窗口并释放当前图像（命令与窗口关闭拦截共用）。
 pub fn close_editor_impl(app: &AppHandle) {
     if let Some(editor) = app.get_webview_window("editor") {
+        // 窗口只是隐藏复用，前端还攥着整张图的 Konva 画布（4K 约 33MB，加滤镜缓存更多）。
+        // 先通知前端卸掉画布再收窗，避免标注过一次之后内存永久高企。
+        let _ = editor.emit_to("editor", "editor:close", ());
         let _ = editor.hide();
     }
     if let Some(state) = app.try_state::<EditorState>() {

@@ -11,7 +11,8 @@
 //! 首对帧检测「固定表头/表尾」（粘性导航栏等，逐行相同则排除），
 //! 之后在内容带上搜索使 SAD 最小的垂直位移 dy，追加帧尾 dy 行新内容。
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::Mutex;
 
 use image::RgbaImage;
 use serde::Serialize;
@@ -37,6 +38,8 @@ const MAX_TOTAL_H: u32 = 24_000;
 /// 按像素封顶后，宽屏选区会更早收敛（3840 宽约 1.6 万行），窄选区仍可用满行数上限。
 const MAX_TOTAL_PX: u64 = 64_000_000;
 const MAX_FRAMES: u32 = 150;
+/// 暂停后多久没有操作就自动收尾（用户可能走开了，别让会话永远挂着）
+const PAUSE_IDLE_MS: u64 = 90_000;
 
 const SIG_RUN: u8 = 0;
 const SIG_FINISH: u8 = 1;
@@ -46,6 +49,12 @@ const SIG_CANCEL: u8 = 2;
 pub struct ScrollState {
     pub active: AtomicBool,
     pub signal: AtomicU8,
+    /// 暂停：停止自动滚动，等用户手动步进 / 继续 / 完成
+    pub paused: AtomicBool,
+    /// 待处理的手动步进（滚轮档数，0 表示无请求）
+    pub step: AtomicI32,
+    /// 选区中心（物理像素）：恢复自动滚动时把目标窗口重新拉回前台
+    pub center: Mutex<Option<(i32, i32)>>,
 }
 
 pub fn is_active(app: &AppHandle) -> bool {
@@ -60,6 +69,13 @@ struct Progress {
     height_px: u32,
     frames: u32,
     horizontal: bool,
+    /// 已暂停（等待手动步进）
+    paused: bool,
+    /// 当前每帧滚轮档数
+    notches: u32,
+    /// 需要提示的异常（匹配失败 / 疑似触底），正常滚动时为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warn: Option<String>,
 }
 
 // ===================== 行签名与匹配 =====================
@@ -477,7 +493,7 @@ fn create_windows(app: &AppHandle, abs: (i32, i32, u32, u32), scale: f64) {
     }
 
     // 控制条：优先放选区下方，其次上方，兜底选区内底部（会被表尾剔除逻辑吸收）
-    let cw = (320.0 * scale) as u32;
+    let cw = (392.0 * scale) as u32;
     let ch = (56.0 * scale) as u32;
     let monitor_bottom = Monitor::from_point(ax + 2, ay + 2)
         .ok()
@@ -530,6 +546,8 @@ impl Drop for SessionGuard {
         close_windows(&self.0);
         if let Some(s) = self.0.try_state::<ScrollState>() {
             s.active.store(false, Ordering::SeqCst);
+            s.paused.store(false, Ordering::SeqCst);
+            s.step.store(0, Ordering::SeqCst);
         }
     }
 }
@@ -557,16 +575,40 @@ fn sleep_signal(state: &ScrollState, total_ms: u64) -> u8 {
     state.signal.load(Ordering::SeqCst)
 }
 
-fn emit_progress(app: &AppHandle, height_px: u32, frames: u32, axis: Axis) {
+fn emit_progress(
+    app: &AppHandle,
+    stitcher: &Stitcher,
+    frames: u32,
+    axis: Axis,
+    state: &ScrollState,
+    notches: u32,
+    warn: Option<&str>,
+) {
     let _ = app.emit_to(
         CTL_LABEL,
         "scroll:progress",
         Progress {
-            height_px,
+            height_px: stitcher.total_height(),
             frames,
             horizontal: axis == Axis::Horizontal,
+            paused: state.paused.load(Ordering::SeqCst),
+            notches,
+            warn: warn.map(str::to_string),
         },
     );
+}
+
+/// 恢复自动滚动：把滚轮目标窗口重新带回前台（用户可能刚点过控制条）。
+fn rearm_target(app: &AppHandle, center: (i32, i32)) {
+    let _ = app.run_on_main_thread(move || {
+        #[cfg(windows)]
+        {
+            activate_window_at(center);
+            set_cursor(center.0, center.1);
+        }
+        #[cfg(not(windows))]
+        let _ = center;
+    });
 }
 
 fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: SessionGuard, axis: Axis) {
@@ -576,6 +618,9 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
         origin.1 + rect.y + rect.h as i32 / 2,
     );
     let saved_cursor = cursor_pos();
+    if let Ok(mut c) = state.center.lock() {
+        *c = Some(center);
+    }
 
     // 依选区在滚动方向上的长度自适应滚动力度，保证足够重叠
     let span = if axis == Axis::Horizontal {
@@ -598,28 +643,66 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
+    let mut limited = false;
     let result: Option<Stitcher> = (|| {
         let first = capture_region(origin, rect).ok()?;
         let mut stitcher = Stitcher::new(first, axis);
         let mut frames = 1u32;
         let mut still = 0u32;
         let mut fails = 0u32;
-        emit_progress(&app, stitcher.total_height(), frames, axis);
+        let mut warn: Option<String> = None;
+        emit_progress(
+            &app,
+            &stitcher,
+            frames,
+            axis,
+            &state,
+            notches,
+            warn.as_deref(),
+        );
 
         loop {
-            if state.signal.load(Ordering::SeqCst) == SIG_CANCEL {
-                return None;
-            }
-            if state.signal.load(Ordering::SeqCst) == SIG_FINISH {
-                return Some(stitcher);
+            match state.signal.load(Ordering::SeqCst) {
+                SIG_CANCEL => return None,
+                SIG_FINISH => return Some(stitcher),
+                _ => {}
             }
 
+            // 暂停：停在这里等「继续 / 手动步进 / 完成 / 取消」。
+            // 闲置太久（用户走开）就带着已拼内容收尾，别把门闩一直占着。
+            let mut manual = 0u32;
+            if state.paused.load(Ordering::SeqCst) {
+                let mut idle = 0u64;
+                loop {
+                    match state.signal.load(Ordering::SeqCst) {
+                        SIG_CANCEL => return None,
+                        SIG_FINISH => return Some(stitcher),
+                        _ => {}
+                    }
+                    let s = state.step.swap(0, Ordering::SeqCst);
+                    if s != 0 {
+                        manual = s.unsigned_abs().clamp(1, 3);
+                        break;
+                    }
+                    if !state.paused.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if idle >= PAUSE_IDLE_MS {
+                        return Some(stitcher);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    idle += 40;
+                }
+            }
+
+            let step = if manual > 0 { manual } else { notches };
             set_cursor(center.0, center.1);
             match axis {
-                Axis::Vertical => send_wheel(notches),
-                Axis::Horizontal => send_wheel_h(notches),
+                Axis::Vertical => send_wheel(step as i32),
+                Axis::Horizontal => send_wheel_h(step as i32),
             }
-            if sleep_signal(&state, 340) == SIG_CANCEL {
+            // 手动步进时等短一点，手感更跟手；自动滚动留足渲染时间
+            if sleep_signal(&state, if manual > 0 { 240 } else { 340 }) == SIG_CANCEL {
                 return None;
             }
 
@@ -632,23 +715,58 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
                 Push::Moved(_) => {
                     still = 0;
                     fails = 0;
-                    emit_progress(&app, stitcher.total_height(), frames, axis);
+                    warn = None;
+                    emit_progress(
+                        &app,
+                        &stitcher,
+                        frames,
+                        axis,
+                        &state,
+                        notches,
+                        warn.as_deref(),
+                    );
                 }
                 Push::Still => {
                     still += 1;
                     if still >= 3 {
                         return Some(stitcher); // 触底
                     }
+                    warn = Some("画面没有变化，可能已到底".into());
+                    emit_progress(
+                        &app,
+                        &stitcher,
+                        frames,
+                        axis,
+                        &state,
+                        notches,
+                        warn.as_deref(),
+                    );
                 }
                 Push::Fail => {
                     fails += 1;
-                    if fails >= 4 {
-                        return Some(stitcher);
+                    // 连续三帧对不上才停：偶发的一帧（光标闪烁 / 懒加载占位）不该打断会话
+                    if fails >= 3 {
+                        // 连续对不上：停下来交给用户，别空转继续注入滚轮
+                        state.paused.store(true, Ordering::SeqCst);
+                        warn = Some("连续几帧无法对齐，已暂停".into());
+                        fails = 0;
+                    } else {
+                        warn = Some("这一帧没能对齐，再试一次".into());
                     }
+                    emit_progress(
+                        &app,
+                        &stitcher,
+                        frames,
+                        axis,
+                        &state,
+                        notches,
+                        warn.as_deref(),
+                    );
                 }
             }
 
             if stitcher.reached_limit() || frames >= MAX_FRAMES {
+                limited = true;
                 return Some(stitcher);
             }
         }
@@ -661,9 +779,14 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
     drop(guard);
 
     if let Some(stitcher) = result {
+        let extra = stitcher.extra_rows();
         let img = stitcher.assemble();
         if let Err(e) = crate::editor::open_editor_image(&app, img) {
             capture::notify(&app, &format!("滚动截图完成，但无法打开编辑器：{e}"));
+        } else if extra == 0 {
+            capture::notify(&app, "没有检测到滚动，长图与原选区相同");
+        } else if limited {
+            capture::notify(&app, "已达长图长度上限，先给出已拼接的部分");
         }
     }
 }
@@ -719,6 +842,8 @@ pub async fn scroll_capture_start(
         // 门闩已占，从这里开始由守卫负责复位
         let guard = SessionGuard(app.clone());
         state.signal.store(SIG_RUN, Ordering::SeqCst);
+        state.paused.store(false, Ordering::SeqCst);
+        state.step.store(0, Ordering::SeqCst);
 
         capture::hide_overlay(&app);
         create_windows(
@@ -752,6 +877,41 @@ pub fn scroll_capture_cancel(app: AppHandle) {
     if let Some(s) = app.try_state::<ScrollState>() {
         s.signal.store(SIG_CANCEL, Ordering::SeqCst);
     }
+}
+
+/// 暂停 / 继续自动滚动。暂停时控制条留在前台接收键盘与步进操作。
+#[tauri::command]
+pub fn scroll_capture_set_paused(app: AppHandle, paused: bool) {
+    let Some(state) = app.try_state::<ScrollState>() else {
+        return;
+    };
+    state.paused.store(paused, Ordering::SeqCst);
+    let center = state.center.lock().ok().and_then(|c| *c);
+    let Some(center) = center else {
+        return;
+    };
+    if paused {
+        // 暂停后用户要按 ↓ / Enter，控制条得拿到焦点
+        if let Some(win) = app.get_webview_window(CTL_LABEL) {
+            let _ = app.run_on_main_thread(move || {
+                let _ = win.set_focus();
+            });
+        }
+    } else {
+        rearm_target(&app, center);
+    }
+}
+
+/// 手动步进一帧（档数 1..=3，正数向前）。调用即进入暂停态。
+#[tauri::command]
+pub fn scroll_capture_step(app: AppHandle, notches: Option<i32>) {
+    let Some(state) = app.try_state::<ScrollState>() else {
+        return;
+    };
+    state.paused.store(true, Ordering::SeqCst);
+    state
+        .step
+        .store(notches.unwrap_or(1).clamp(1, 3), Ordering::SeqCst);
 }
 
 #[cfg(test)]

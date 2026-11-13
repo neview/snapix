@@ -99,6 +99,10 @@ export default function CanvasStage({
     el.src = image.url;
     return () => {
       live = false;
+      el.onload = null;
+      // 换图 / 编辑器关闭（image 置空）时把已解码的位图从状态里摘掉，
+      // 否则窗口隐藏了图还留在内存里（4K 一张 33MB）
+      setImgEl((cur) => (cur === el ? null : cur));
     };
   }, [image]);
 

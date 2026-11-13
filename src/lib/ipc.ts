@@ -219,6 +219,12 @@ export type ScrollProgress = {
   horizontal: boolean;
   heightPx: number;
   frames: number;
+  /** 已暂停，等待手动步进 */
+  paused: boolean;
+  /** 每帧滚轮档数 */
+  notches: number;
+  /** 需要提示的异常（匹配失败 / 疑似触底） */
+  warn?: string;
 };
 
 /** 对选区开始滚动长截图（自动滚动 + 拼接）。 */
@@ -240,6 +246,16 @@ export function scrollCaptureStop() {
 /** 取消滚动截图。 */
 export function scrollCaptureCancel() {
   return invoke("scroll_capture_cancel");
+}
+
+/** 暂停 / 继续自动滚动（暂停后可逐帧步进）。 */
+export function scrollCaptureSetPaused(paused: boolean) {
+  return invoke("scroll_capture_set_paused", { paused });
+}
+
+/** 手动步进一帧（内部会先进入暂停态）。 */
+export function scrollCaptureStep(notches = 1) {
+  return invoke("scroll_capture_step", { notches });
 }
 
 // ===================== GIF 录制 =====================

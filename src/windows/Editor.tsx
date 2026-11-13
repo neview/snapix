@@ -118,6 +118,8 @@ let toastSeq = 0;
 
 export default function Editor() {
   const stageRef = useRef<Konva.Stage | null>(null);
+  /** 关闭后延迟释放画布的定时器（再次打开时取消） */
+  const clearTimer = useRef<number | null>(null);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [detecting, setDetecting] = useState(false);
   /** 出图（保存 / 复制）进行中：原生保存对话框期间冻结快捷键，避免 Esc 同时关掉编辑器 */
@@ -202,8 +204,14 @@ export default function Editor() {
 
   // 接收待标注图像（shot:// 协议）
   useEffect(() => {
-    const apply = (p: ImagePayload) =>
+    const apply = (p: ImagePayload) => {
+      // 新图装载：取消上一次关闭时的延迟释放
+      if (clearTimer.current != null) {
+        window.clearTimeout(clearTimer.current);
+        clearTimer.current = null;
+      }
       setImage({ url: p.imageUrl, width: p.width, height: p.height });
+    };
     const un = listen<ImagePayload>("editor:open", (e) => apply(e.payload));
     // 窗口是首次标注时才创建的：创建那一刻事件可能早于本监听，主动拉一次兜底
     editorPending()
@@ -221,6 +229,23 @@ export default function Editor() {
       un.then((f) => f());
     };
   }, [setImage]);
+
+  // 窗口关闭只是隐藏复用：把整图 / 画布 / 标注全部卸掉，别让一张 4K 图的
+  // 位图与滤镜缓存常驻内存（下次 editor:open 会重新装载）。
+  // 延迟 1.5s 再清：紧接着重开时旧图还在，不会闪一帧空白。
+  useEffect(() => {
+    const un = listen("editor:close", () => {
+      if (clearTimer.current != null) window.clearTimeout(clearTimer.current);
+      clearTimer.current = window.setTimeout(() => {
+        clearTimer.current = null;
+        useEditor.getState().reset();
+        useEditor.setState({ image: null, crop: null });
+      }, 1500);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   const exportUrl = (cb: (url: string) => void) => {
     const stage = stageRef.current;
