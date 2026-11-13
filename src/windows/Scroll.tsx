@@ -93,10 +93,14 @@ function Ctl() {
     return () => window.removeEventListener("keydown", onKey);
   }, [togglePause, step]);
 
+  // 步进方向跟着滚动方向走（纵向 ↓ / 横向 →）；只有暂停时补上操作提示
+  const arrow = horizontal ? "→" : "↓";
   const hint = warn
-    ? warn
+    ? paused
+      ? `${warn} · 按 ${arrow} 步进`
+      : warn
     : paused
-      ? "按 ↓ 步进一帧 · 空格继续"
+      ? `按 ${arrow} 步进一帧 · 空格继续`
       : horizontal
         ? "自动向右滚动拼接 · 到边自动完成"
         : "自动滚动拼接 · 触底自动完成";

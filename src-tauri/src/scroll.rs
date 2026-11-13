@@ -748,7 +748,7 @@ fn run_session(app: AppHandle, origin: (i32, i32), rect: SelRect, guard: Session
                     if fails >= 3 {
                         // 连续对不上：停下来交给用户，别空转继续注入滚轮
                         state.paused.store(true, Ordering::SeqCst);
-                        warn = Some("无法对齐 · 按 ↓ 逐帧步进".into());
+                        warn = Some("连续几帧无法对齐".into());
                         fails = 0;
                     } else {
                         warn = Some("这一帧没能对齐，再试一次".into());
