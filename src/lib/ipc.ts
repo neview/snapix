@@ -59,6 +59,8 @@ export type Settings = {
   updateCheck: boolean;
   /** 截图是否把鼠标光标一起拍进去 */
   captureCursor: boolean;
+  /** 主题：dark | light | system */
+  theme: "dark" | "light" | "system";
 };
 
 /** 历史记录条目。 */

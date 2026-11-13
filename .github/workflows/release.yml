@@ -43,11 +43,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # 代码签名：仓库里配好 SNAPIX_SIGN_PFX_BASE64 / SNAPIX_SIGN_PFX_PASSWORD 就自动签，
+      # 没配就跳过（sign-windows.mjs 会直接 exit 0），普通构建不受影响。
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SNAPIX_SIGN_PFX_BASE64: ${{ secrets.SNAPIX_SIGN_PFX_BASE64 }}
+          SNAPIX_SIGN_PFX_PASSWORD: ${{ secrets.SNAPIX_SIGN_PFX_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Snapix ${{ github.ref_name }}
@@ -58,6 +62,9 @@ jobs:
             更新包使用 minisign 签名校验，下载完成后由安装器接管重启。
           releaseDraft: false
           prerelease: false
+          # 有证书才启用签名配置；Tauri 会先签 exe / 安装包，再算更新包签名，
+          # 因此不能用「打包完再签」的方式，否则 latest.json 里的 .sig 会失效。
+          args: ${{ secrets.SNAPIX_SIGN_PFX_BASE64 != '' && '--config src-tauri/tauri.signing.conf.json' || '' }}
           uploadUpdaterJson: true
           # 同时产出 NSIS 与 MSI 时，更新包必须选 NSIS（配置里的 installMode 也是 NSIS）
           updaterJsonPreferNsis: true

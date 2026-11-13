@@ -21,7 +21,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <div className="grid h-screen w-screen place-items-center bg-[#0a0a0c] p-6 text-center text-white/80">
+      <div className="grid h-screen w-screen place-items-center bg-[var(--shell)] p-6 text-center text-white/80">
         <div>
           <div className="text-[13px]">这个窗口出了点问题</div>
           <p className="mx-auto mt-1.5 max-w-xs truncate text-[11px] text-white/35">

@@ -1,4 +1,5 @@
-import { check } from "@tauri-apps/plugin-updater";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** 更新端点返回的版本信息（不含下载资源句柄）。 */
 export type UpdateInfo = {
@@ -24,51 +25,70 @@ export function cachedUpdate() {
 }
 
 /**
- * 检查更新。拿到元数据后立刻释放 `Update` 资源——
- * 真正安装时会重新 check 一次，避免长期持有原生资源或用到过期签名。
+ * 检查更新。
+ *
+ * 走 Rust 侧自建命令而不是 `@tauri-apps/plugin-updater` 的 `check()`：
+ * 下载链路要能中止（见 `downloadUpdate`），把检查也收拢到同一处，
+ * 避免 JS 侧再持有一个原生 `Update` 资源。
  */
 export async function checkUpdate(): Promise<UpdateInfo | null> {
-  const update = await check({ timeout: 15000 });
-  if (!update) {
-    cached = null;
-    return null;
-  }
-  const info: UpdateInfo = {
-    version: update.version,
-    currentVersion: update.currentVersion,
-    notes: update.body?.trim() || undefined,
-    date: update.date,
-  };
-  await update.close().catch(() => {});
+  const info = await invoke<UpdateInfo | null>("update_fetch");
   cached = info;
   return info;
 }
 
+/** 取消除进行中的下载（abort 任务 → 连接立刻断开，已下载部分丢弃）。 */
+export function cancelUpdate() {
+  return invoke("update_cancel");
+}
+
 /**
- * 下载并交给安装器。Windows 上安装器启动后本进程会退出，
+ * 下载安装包（带进度）。resolve 表示已下载并通过签名校验，还需要调 `installDownloaded`。
+ * 用户取消时 reject 一个 `AbortError` 的 DOMException，调用方据此区分「取消」和「失败」。
+ */
+export function downloadUpdate(onProgress: (p: UpdateProgress) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const unlisteners: UnlistenFn[] = [];
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      unlisteners.forEach((f) => f());
+      fn();
+    };
+
+    void (async () => {
+      try {
+        unlisteners.push(
+          await listen<UpdateProgress>("update:progress", (e) => onProgress(e.payload)),
+        );
+        unlisteners.push(await listen("update:downloaded", () => finish(resolve)));
+        unlisteners.push(
+          await listen<string>("update:failed", (e) => finish(() => reject(new Error(e.payload)))),
+        );
+        unlisteners.push(
+          await listen("update:cancelled", () =>
+            finish(() => reject(new DOMException("已取消", "AbortError"))),
+          ),
+        );
+        await invoke("update_download");
+      } catch (e) {
+        finish(() => reject(e));
+      }
+    })();
+  });
+}
+
+/** 把下载好的包交给安装器；Windows 上安装器启动后本进程会退出。 */
+export function installDownloaded() {
+  return invoke("update_install");
+}
+
+/**
+ * 下载并安装（一步到位）。Windows 上安装器启动后本进程会退出，
  * 所以调用方不要依赖这个 Promise 一定会 resolve。
  */
 export async function installUpdate(onProgress: (p: UpdateProgress) => void) {
-  const update = await check({ timeout: 15000 });
-  if (!update) throw new Error("没有可用的更新");
-  let downloaded = 0;
-  let total: number | null = null;
-  try {
-    await update.downloadAndInstall(
-      (event) => {
-        if (event.event === "Started") {
-          total = event.data.contentLength ?? null;
-          onProgress({ downloaded: 0, total });
-        } else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          onProgress({ downloaded, total });
-        } else {
-          onProgress({ downloaded: total ?? downloaded, total });
-        }
-      },
-      { restartAfterInstall: true },
-    );
-  } finally {
-    await update.close().catch(() => {});
-  }
+  await downloadUpdate(onProgress);
+  await installDownloaded();
 }

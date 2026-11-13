@@ -55,6 +55,63 @@ body,
   margin: 0;
 }
 
+/* ============================================================
+   主题层
+   深色是默认值（不写 data-theme 就是深色）。亮色通过整组反相实现：
+   界面里绝大多数颜色都是 white/black 的透明度变体 + ink 色阶，
+   把这两个基色与 ink 阶整体翻转，两百多处工具类一次性跟着变。
+   注意：只给「主窗口 / 标注编辑器」挂 data-theme=light；
+   截图遮罩、贴图、晾衣绳始终是深色（它们盖在画面或桌面上）。
+   ============================================================ */
+:root {
+  color-scheme: dark;
+  --shell: #0a0a0c;
+  --shell-2: #0f0f11;
+  --glass-bg: rgba(12, 12, 14, 0.68);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --capsule-bg: rgba(12, 12, 14, 0.72);
+  --capsule-border: rgba(255, 255, 255, 0.1);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --scroll-thumb: rgba(255, 255, 255, 0.07);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.16);
+  --ambient-1: rgba(255, 255, 255, 0.07);
+  --ambient-2: rgba(150, 170, 205, 0.055);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --shell: #f6f6f8;
+  --shell-2: #fbfbfd;
+  --glass-bg: rgba(252, 252, 254, 0.72);
+  --glass-border: rgba(0, 0, 0, 0.08);
+  --capsule-bg: rgba(252, 252, 254, 0.8);
+  --capsule-border: rgba(0, 0, 0, 0.08);
+  --hairline: rgba(0, 0, 0, 0.07);
+  --scroll-thumb: rgba(0, 0, 0, 0.12);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.24);
+  --ambient-1: rgba(0, 0, 0, 0.035);
+  --ambient-2: rgba(90, 110, 150, 0.05);
+
+  /* 前景基色翻成近黑：text-white/60 → rgba(16,16,20,.6) */
+  --color-white: #101014;
+  /* 实心反色块（bg-white text-black 的按钮）翻成近白 */
+  --color-black: #ffffff;
+
+  /* ink 阶整组反相：ink-0 最暗、ink-950 最亮 */
+  --color-ink-0: #0b0b0e;
+  --color-ink-50: #17171b;
+  --color-ink-100: #26262b;
+  --color-ink-200: #3a3a41;
+  --color-ink-300: #55555d;
+  --color-ink-400: #6f6f78;
+  --color-ink-500: #8a8a93;
+  --color-ink-600: #a8a8b0;
+  --color-ink-700: #c9c9cf;
+  --color-ink-800: #e4e4e8;
+  --color-ink-900: #f2f2f4;
+  --color-ink-950: #fafafa;
+}
+
 body {
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI Variable Text",
@@ -75,24 +132,24 @@ body {
 
 /* 玻璃层：低饱和、低反差，靠 blur 与发丝边分层 */
 .glass {
-  background: color-mix(in srgb, #0c0c0e 68%, transparent);
+  background: var(--glass-bg);
   backdrop-filter: blur(28px) saturate(120%);
   -webkit-backdrop-filter: blur(28px) saturate(120%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--glass-border);
 }
 
 /* 玻璃胶囊（悬浮工具条 / 提示） */
 .capsule {
-  background: rgba(12, 12, 14, 0.72);
+  background: var(--capsule-bg);
   backdrop-filter: blur(24px) saturate(130%);
   -webkit-backdrop-filter: blur(24px) saturate(130%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--capsule-border);
   box-shadow: 0 8px 28px -8px rgba(0, 0, 0, 0.6);
 }
 
 /* 发丝分割线：1px 且只有 6% 白，比 border-white/10 更安静 */
 .hairline {
-  border-color: rgba(255, 255, 255, 0.06);
+  border-color: var(--hairline);
 }
 
 /* 滚动条：只在悬停时显形，平时几乎看不见 */
@@ -101,13 +158,13 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--scroll-thumb);
   border-radius: 8px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--scroll-thumb-hover);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {

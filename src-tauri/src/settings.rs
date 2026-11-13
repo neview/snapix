@@ -49,6 +49,8 @@ pub struct Settings {
     pub update_check: bool,
     /// 截图是否把鼠标光标一起拍进去
     pub capture_cursor: bool,
+    /// 主题：dark | light | system（只作用于主窗口与标注编辑器）
+    pub theme: String,
 }
 
 impl Default for Settings {
@@ -72,6 +74,7 @@ impl Default for Settings {
             line_enabled: true,
             update_check: true,
             capture_cursor: false,
+            theme: "dark".into(),
         }
     }
 }
@@ -319,6 +322,11 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<(), String>
     #[cfg(desktop)]
     if old.autostart != settings.autostart {
         apply_autostart(&app, settings.autostart);
+    }
+    // 主题变了就广播：各窗口自己套 data-theme（主窗口 / 编辑器才跟随）
+    if old.theme != settings.theme {
+        use tauri::Emitter;
+        let _ = app.emit("theme:changed", settings.theme.clone());
     }
     Ok(())
 }

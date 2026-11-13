@@ -114,15 +114,15 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden rounded-[18px] bg-[#0a0a0c] text-white/90 ring-1 ring-white/[0.07]">
+    <div className="relative flex h-full flex-col overflow-hidden rounded-[18px] bg-[var(--shell)] text-white/90 ring-1 ring-white/[0.07]">
       {/* 氛围层：顶部一道极淡的天光 + 右下一点冷灰反光，让纯深色不显得「死板」 */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
         style={{
           background:
-            "radial-gradient(90% 55% at 50% -12%, rgba(255,255,255,0.07), transparent 62%)," +
-            "radial-gradient(45% 38% at 88% 108%, rgba(150,170,205,0.055), transparent 70%)",
+            "radial-gradient(90% 55% at 50% -12%, var(--ambient-1), transparent 62%)," +
+            "radial-gradient(45% 38% at 88% 108%, var(--ambient-2), transparent 70%)",
         }}
       />
       {/* 顶部发丝高光：玻璃边缘的受光面 */}
@@ -276,7 +276,7 @@ function Dashboard({
               whileHover={{ y: -1 }}
               whileTap={{ scale: 0.985 }}
               onClick={() => startCapture()}
-              className="inline-flex h-10 items-center gap-2 rounded-full bg-white px-5 text-[13px] font-semibold text-[#0a0a0c] shadow-[0_8px_24px_-10px_rgba(255,255,255,0.5)] transition-colors hover:bg-white/90"
+              className="inline-flex h-10 items-center gap-2 rounded-full bg-white px-5 text-[13px] font-semibold text-[var(--shell)] shadow-[0_8px_24px_-10px_rgba(255,255,255,0.5)] transition-colors hover:bg-white/90"
             >
               <Camera size={16} strokeWidth={2} />
               立即截图
