@@ -23,12 +23,15 @@ import {
 } from "@/lib/ipc";
 import {
   cachedUpdate,
+  cancelUpdate,
   checkUpdate,
   installUpdate,
   type UpdateInfo,
   type UpdateProgress,
 } from "@/lib/updater";
+import { SunMoon } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { applyTheme } from "@/lib/theme";
 
 export default function SettingsPanel({
   focusUpdate = false,
@@ -238,6 +241,23 @@ export default function SettingsPanel({
         </Row>
       </Section>
 
+      <Section icon={SunMoon} title="外观">
+        <Row label="主题" hint="深色 / 浅色 / 跟随系统；截图遮罩与贴纸层始终保持中性深色">
+          <Segmented
+            value={s.theme}
+            options={[
+              { v: "dark", label: "深色" },
+              { v: "light", label: "浅色" },
+              { v: "system", label: "跟随系统" },
+            ]}
+            onChange={(v) => {
+              applyTheme(v as Settings["theme"]);
+              patch({ theme: v as Settings["theme"] });
+            }}
+          />
+        </Row>
+      </Section>
+
       <Section icon={Rocket} title="通用">
         <Row label="开机自启" hint="登录 Windows 后静默启动到托盘">
           <Toggle checked={s.autostart} onChange={(v) => patch({ autostart: v })} />
@@ -331,10 +351,16 @@ function UpdateSection({
       await installUpdate(setProgress);
       setMessage("安装程序已启动，应用将自动重启");
     } catch (e) {
-      setMessage(`更新失败：${String(e)}`);
+      // 取消是正常操作，不当成失败弹红字
+      if (e instanceof DOMException && e.name === "AbortError") setMessage("已取消下载");
+      else setMessage(`更新失败：${String(e)}`);
     } finally {
       setInstalling(false);
     }
+  };
+
+  const onCancel = () => {
+    cancelUpdate().catch(() => {});
   };
 
   // 托盘「检查更新」：nonce 变化时自动跑一次
@@ -396,6 +422,14 @@ function UpdateSection({
                   <Download size={11} strokeWidth={2} />
                   {installing ? "正在下载…" : "下载并安装"}
                 </button>
+                {installing && (
+                  <button
+                    onClick={onCancel}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 text-[11px] text-white/70 transition-colors hover:bg-white/[0.09] hover:text-white"
+                  >
+                    取消下载
+                  </button>
+                )}
                 {installing && percent !== null && (
                   <span className="text-[10.5px] tabular-nums text-white/35">{percent}%</span>
                 )}
@@ -492,7 +526,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       <span
         className={cn(
           "absolute top-[3px] h-4 w-4 rounded-full transition-all duration-200",
-          checked ? "bg-[#0a0a0c]" : "bg-white/80",
+          checked ? "bg-[var(--shell)]" : "bg-white/80",
         )}
         style={{ left: checked ? 20 : 3 }}
       />

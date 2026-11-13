@@ -11,6 +11,7 @@ mod scroll;
 mod settings;
 mod snap;
 mod uia;
+mod update;
 mod util;
 mod winfx;
 
@@ -359,6 +360,7 @@ pub fn run() {
         .manage(history::HistoryState::default())
         .manage(line::LineState::default())
         .manage(scroll::ScrollState::default())
+        .manage(update::UpdateState::default())
         .manage(gifrec::GifState::default())
         // shot:// 协议：零压缩位图直出（冻屏帧 / 编辑图 / 贴图 / 历史缩略）。
         // 关键：用异步版，在后台线程做 BMP 编码。同步协议处理器运行在主 UI 线程，
@@ -589,6 +591,10 @@ pub fn run() {
             editor::editor_ready,
             editor::editor_pending,
             uia::element_at,
+            update::update_fetch,
+            update::update_download,
+            update::update_cancel,
+            update::update_install,
             scroll::scroll_capture_start,
             scroll::scroll_capture_stop,
             scroll::scroll_capture_cancel,

@@ -181,7 +181,7 @@ export default function HistoryPanel() {
             className={cn(
               "flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[11.5px] transition-colors duration-200 disabled:opacity-30",
               selectMode
-                ? "bg-white text-[#0a0a0c]"
+                ? "bg-white text-[var(--shell)]"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white/80",
             )}
           >
@@ -208,7 +208,7 @@ export default function HistoryPanel() {
             className={cn(
               "flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[11.5px] transition-colors duration-200 disabled:opacity-30",
               confirmClear
-                ? "bg-white text-[#0a0a0c]"
+                ? "bg-white text-[var(--shell)]"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white/80",
             )}
           >
@@ -299,7 +299,7 @@ export default function HistoryPanel() {
                   className={cn(
                     "absolute left-2 top-2 z-10 grid h-5 w-5 place-items-center rounded-full border transition-colors",
                     selected.has(e.id)
-                      ? "border-white bg-white text-[#0a0a0c]"
+                      ? "border-white bg-white text-[var(--shell)]"
                       : "border-white/40 bg-black/40 text-transparent",
                   )}
                 >
@@ -365,7 +365,7 @@ export default function HistoryPanel() {
                     title={confirmDel === e.id ? "再点一次确认删除" : "删除"}
                     disabled={busy.has(e.id)}
                     onClick={() => askDelete(e.id)}
-                    className={confirmDel === e.id ? "bg-white text-[#0a0a0c]" : undefined}
+                    className={confirmDel === e.id ? "bg-white text-[var(--shell)]" : undefined}
                   >
                     {confirmDel === e.id ? (
                       <span className="text-[9.5px] font-semibold">确认</span>
