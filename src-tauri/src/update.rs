@@ -13,9 +13,21 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Updater, UpdaterExt};
 
 use crate::lock;
+
+/// 检查更新的超时。没有它时网络被墙 / 代理不通会一直转圈（用户以为卡死）。
+const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// 下载超时：整包是一次请求，给足时间，避免慢网把 5MB 的包掐断。
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+
+fn build_updater(app: &AppHandle, timeout: std::time::Duration) -> Result<Updater, String> {
+    app.updater_builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| e.to_string())
+}
 
 #[derive(Default)]
 pub struct UpdateState {
@@ -47,7 +59,7 @@ struct Progress {
 /// 检查更新。结果里只有元数据，真正的下载要再调 `update_download`。
 #[tauri::command]
 pub async fn update_fetch(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = build_updater(&app, CHECK_TIMEOUT)?;
     let found = updater.check().await.map_err(|e| e.to_string())?;
     if let Some(s) = app.try_state::<UpdateState>() {
         *lock(&s.bytes) = None;
@@ -80,7 +92,7 @@ pub fn update_download(app: AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let result = async {
-            let updater = app2.updater().map_err(|e| e.to_string())?;
+            let updater = build_updater(&app2, DOWNLOAD_TIMEOUT)?;
             let update = updater
                 .check()
                 .await
@@ -137,7 +149,7 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
     let state = app.state::<UpdateState>();
     let bytes = lock(&state.bytes).take().ok_or("安装包尚未下载完成")?;
 
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = build_updater(&app, CHECK_TIMEOUT)?;
     // 重新 check 拿一个 Update 句柄来执行安装（下载时已经校验过签名）。
     let update = updater
         .check()
