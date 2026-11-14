@@ -1,6 +1,6 @@
-# Snapix v0.6.5 统一测试清单
+# Snapix v0.6.6 统一测试清单
 
-> 安装 `src-tauri\target\release\bundle\nsis\Snapix_0.6.5_x64-setup.exe` 后逐项勾选。
+> 安装 `src-tauri\target\release\bundle\nsis\Snapix_0.6.6_x64-setup.exe` 后逐项勾选。
 > 涉及快捷键的项目，先到「设置 → 快捷键」配好再测。
 
 ## 1. 基础截图链路

@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.6.5"
+version = "0.6.6"
 description = "Snapix — 全能 Windows 截图工具"
 authors = ["Snapix"]
 edition = "2021"

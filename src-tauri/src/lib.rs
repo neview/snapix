@@ -307,8 +307,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+    // 托盘不能直接用应用图标：那一版带一圈白色贴纸描边，缩到 16px 时白边 + 奶油色机身
+    // 几乎填满整个托盘格，深色任务栏上看起来就是一块「白底方块」。这里单独用一枚
+    // 透明底、加粗轮廓的小尺寸字形（icons/tray-32.png），16px 下仍能认出是相机。
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32.png")) {
+        Ok(icon) => builder = builder.icon(icon),
+        // 理论上不会失败（编译期就嵌进二进制），兜底回应用图标，至少不会缺图。
+        Err(_) => {
+            if let Some(icon) = app.default_window_icon() {
+                builder = builder.icon(icon.clone());
+            }
+        }
     }
 
     builder.build(app)?;
