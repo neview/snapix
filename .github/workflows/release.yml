@@ -65,6 +65,6 @@ jobs:
           # 有证书才启用签名配置；Tauri 会先签 exe / 安装包，再算更新包签名，
           # 因此不能用「打包完再签」的方式，否则 latest.json 里的 .sig 会失效。
           args: ${{ secrets.SNAPIX_SIGN_PFX_BASE64 != '' && '--config src-tauri/tauri.signing.conf.json' || '' }}
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           # 同时产出 NSIS 与 MSI 时，更新包必须选 NSIS（配置里的 installMode 也是 NSIS）
           updaterJsonPreferNsis: true
