@@ -14,7 +14,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use image::{
     codecs::png::{CompressionType, FilterType, PngEncoder},
@@ -45,9 +45,13 @@ const THUMB_MAX: u32 = 460;
 const LAND_TIMEOUT_MS: u64 = 3000;
 
 /// 落地必须由前端确认解码 + 两帧绘制，超时安全收遮罩并报错。
-const ITEM_READY_TIMEOUT: Duration = Duration::from_millis(2000);
-const SAVE_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const ITEM_READY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// 等挂图写盘的上限。4K 选区 PNG（Fast）通常 200–500ms，超过 4s 基本就是磁盘异常，
+/// 不能让它继续把遮罩扣在屏幕上。
+const SAVE_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
 const PIN_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// 收尾阶段与主线程打交道的上限：这时候用户正对着一块冻屏，必须尽快放开。
+const MAIN_HOP_TIMEOUT: Duration = Duration::from_millis(2500);
 /// 未完成交接（包括前端放弃）的事务都有限存活；失败不撤掉绳上原图。
 const DETACH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -599,6 +603,7 @@ fn clear_pending(app: &AppHandle, id: &str) {
 
 /// 后台等待真实的图片绘制确认；等待者必须在 pending 改变之前安装。
 pub fn land(app: &AppHandle, id: &str) -> Result<(), String> {
+    let started = Instant::now();
     let st = app.try_state::<LineState>().ok_or("晾衣绳状态缺失")?;
     let (ready_tx, ready_rx) = mpsc::channel();
     let (save_tx, save_rx) = mpsc::channel();
@@ -627,7 +632,7 @@ pub fn land(app: &AppHandle, id: &str) -> Result<(), String> {
     }
     clear_pending(app, id);
     let item_id = id.to_string();
-    let shown = crate::capture::on_main_thread(app, move |app| {
+    let shown = crate::capture::on_main_thread_within(app, MAIN_HOP_TIMEOUT, move |app| {
         show_now(app);
         notify(app, Some(&item_id));
         Ok(())
@@ -639,6 +644,13 @@ pub fn land(app: &AppHandle, id: &str) -> Result<(), String> {
     });
     // 成功才正常揭幕；失败 / 超时同样有限等待后释放桌面，不能永久挡住用户。
     let hidden = finish_flight(app, id, frame);
+    // 这条日志是排查「对勾卡住」的关键：正常应在 1s 内出现一次。
+    log::info!(
+        "对勾收尾 {}ms（落地={:?}，收遮罩={:?}）",
+        started.elapsed().as_millis(),
+        result.as_ref().err(),
+        hidden.as_ref().err()
+    );
     result.and(hidden)
 }
 
@@ -648,14 +660,21 @@ fn finish_flight(app: &AppHandle, id: &str, frame: (String, u64)) -> Result<(), 
     }
     let (tx, rx) = mpsc::channel();
     let handle = app.clone();
+    let frame_cb = frame.clone();
     // 安全释放任务不可因排队超时被丢弃；即使主线程稍后才恢复，也必须执行帧号校验后的隐藏。
-    app.run_on_main_thread(move || {
-        crate::capture::hide_overlay_for_frame_now(&handle, &frame);
+    let queued = app.run_on_main_thread(move || {
+        crate::capture::hide_overlay_for_frame_now(&handle, &frame_cb);
         let _ = tx.send(());
-    })
-    .map_err(|e| e.to_string())?;
-    rx.recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "收起截图遮罩超时".to_string())
+    });
+    if queued.is_ok() && rx.recv_timeout(MAIN_HOP_TIMEOUT).is_ok() {
+        return Ok(());
+    }
+    // 主线程队列堵住（正在建 WebView / 跑原生对话框消息循环）：不能再干等。
+    // 直接走一遍同样的「帧号校验 + 收起」，hide 内部自己会派发并验证，
+    // 万一还是没生效，hide_overlay 还有后台重试兜着。
+    log::warn!("收起遮罩在主线程排队超时，改为直接执行");
+    crate::capture::hide_overlay_for_frame_now(app, &frame);
+    Ok(())
 }
 
 /// 飞行结束命令完全丢失时的最后兜底。帧号检查使旧任务不可能收掉新截图。
@@ -668,6 +687,14 @@ pub fn spawn_land_timeout(app: &AppHandle, id: &str) {
     let id = id.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(LAND_TIMEOUT_MS));
+        // 第一件事永远是「把这一帧的遮罩收掉」，**不看** flight 还在不在。
+        // `finish_flight` 是先删 flight 再真正 hide 的：一旦那次 hide 没生效，
+        // 这里若因为「已经 finish 过」而跳过，就再也没人管这块全屏窗了。
+        // 帧号校验保证它不会误收下一次截图；已经收掉的话这就是个空操作。
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            crate::capture::hide_overlay_for_frame_now(&handle, &frame)
+        });
         let unfinished = app.try_state::<LineState>().is_some_and(|st| {
             st.flights
                 .try_lock()
@@ -677,11 +704,6 @@ pub fn spawn_land_timeout(app: &AppHandle, id: &str) {
         if !unfinished {
             return;
         }
-        // 先投递安全释放遮罩；持状态锁或磁盘出问题也不能长期挡桌面。
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            crate::capture::hide_overlay_for_frame_now(&handle, &frame)
-        });
         if let Some(st) = app.try_state::<LineState>() {
             if let Ok(mut flights) = st.flights.try_lock() {
                 flights.remove(&id); // 唤醒正在等待 ready 的 land
@@ -1546,7 +1568,9 @@ fn finish_return(app: &AppHandle, id: &str, label: &str) {
     clear_pending(app, id);
     let _ = crate::pin::close_pin_now(app, label);
     crate::pin::prewarm_pin(app);
-    notify(app, None);
+    // 带上 id：这张是「飞回来」的，前端据此跳过「从绳上垂下」的入场动画，
+    // 否则替身还在落点上，真图又从上方 40px 掉一遍，看起来就是一次弹跳。
+    notify(app, Some(id));
 }
 
 fn spawn_return_timeout(app: &AppHandle, id: &str) {

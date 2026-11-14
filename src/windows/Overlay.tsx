@@ -7,6 +7,7 @@ import {
   overlayReady,
   overlayFetch,
   overlayClaim,
+  overlayRelease,
   copyRegion,
   copyToLine,
   lineLanded,
@@ -42,6 +43,21 @@ const CLICK_SLOP = 4;
 const MAG_SIZE = 124;
 const MAG_ZOOM = 7;
 const LAND_SETTLE_MS = 2200;
+
+/**
+ * 输出动作的整体兜底：任何一步 IPC 没回来（主线程建窗阻塞、渲染进程 IPC 卡住、
+ * 磁盘极慢），到点都必须把遮罩放开。
+ *
+ * 遮罩是一块整屏置顶窗，卡在 committing 时鼠标键盘全部被它吃掉、连 Esc 都被拦，
+ * 用户唯一的出路就是去托盘强杀进程——这种事一次都不能发生。
+ */
+const COMMIT_TIMEOUT_MS = 6000;
+/** 收起遮罩时最多等这么久；剩下的交给二次收起（releaseFrame）与 Rust 侧重试 */
+const HIDE_WAIT_MS = 260;
+/** 提交超过这么久还没结束就显示「处理中」，别让用户以为已经死了 */
+const SLOW_COMMIT_MS = 600;
+/** committing 期间按 Esc 的宽限：太快放开会误伤正常（几百毫秒）的提交 */
+const ESC_GRACE_MS = 900;
 
 /** 选区顶边进到距屏幕顶端这么近时，把晾衣架举出来；松手即挂上去 */
 const DROP_BAND = 92;
@@ -82,6 +98,8 @@ export default function Overlay() {
   const [committing, setCommitting] = useState(false);
   /** 保存对话框打开中：冻屏画面 / 选区 / 工具条全部原地不动，键盘鼠标一并冻结 */
   const [saving, setSaving] = useState(false);
+  /** 提交迟迟不返回时显示的「处理中」，只为了告诉用户没死机 */
+  const [slowCommit, setSlowCommit] = useState(false);
   /** 正在飞向晾衣绳：从选区矩形过渡到绳上的落点 */
   const [flight, setFlight] = useState<{ from: Rect; to: Rect } | null>(null);
   const flightResolve = useRef<(() => void) | null>(null);
@@ -127,26 +145,39 @@ export default function Overlay() {
 
   /** 遮罩收起后延迟释放冻屏大位图（4K 约 33MB），避免隐藏前闪黑与常驻内存。 */
   const releaseTimer = useRef<number | null>(null);
+  /** 二次收起：第一次 hide 可能静默失败，隔一会儿再补一刀 */
+  const rehideTimer = useRef<number | null>(null);
+  /** 当前是否有可用的冻屏帧（判断二次收起时是不是已经开了新一轮截图） */
+  const frameLive = useRef(false);
+  /** 当前帧号：载荷与收尾都以它为准，跨轮次的操作一律作废 */
+  const frameIdRef = useRef(0);
   const releaseFrame = useCallback(() => {
     // 遮罩要收了：解除「晾衣架投放提示」的钉住状态，否则绳子会一直点不透
     dropArmed.current = false;
     lineDropHint(false).catch(() => {});
+    frameLive.current = false;
     if (releaseTimer.current) window.clearTimeout(releaseTimer.current);
+    if (rehideTimer.current) window.clearTimeout(rehideTimer.current);
     releaseTimer.current = window.setTimeout(() => {
       setFrame(null);
+      setFlight(null);
       const c = canvasRef.current;
       if (c) {
         c.width = 0;
         c.height = 0;
       }
     }, 300);
+    // 兜底收起：`hide()` 是从 IPC 回调派发到主线程执行的，主线程正在建 WebView /
+    // 弹原生对话框时会超时返回 Err，而我们只看到一句被忽略的日志——窗口其实还留在
+    // 屏幕上。过了这一刻前端已经没有任何输入入口，所以这里必须再补一次。
+    // 用 overlayRelease 而不是 cancelCapture：带帧号校验，新一轮截图已经接管时
+    // 是空操作，不会把用户刚唤起的那一次误收掉。
+    const releasedFrame = frameIdRef.current;
+    rehideTimer.current = window.setTimeout(() => {
+      rehideTimer.current = null;
+      if (!frameLive.current) overlayRelease(releasedFrame).catch(() => {});
+    }, 1200);
   }, []);
-
-  const exitCapture = useCallback(() => {
-    reset();
-    releaseFrame();
-    cancelCapture();
-  }, [reset, releaseFrame]);
 
   const toast = useCallback((text: string) => {
     const id = ++toastSeq;
@@ -154,16 +185,81 @@ export default function Overlay() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 1800);
   }, []);
 
+  /** 提交动作的兜底计时：到点无条件把遮罩放开（可能已经出图，只是回执丢了） */
+  const commitTimer = useRef<number | null>(null);
+  const slowTimer = useRef<number | null>(null);
+  const commitStart = useRef(0);
+
+  const clearCommitWatchdog = useCallback(() => {
+    if (commitTimer.current) window.clearTimeout(commitTimer.current);
+    if (slowTimer.current) window.clearTimeout(slowTimer.current);
+    commitTimer.current = null;
+    slowTimer.current = null;
+    setSlowCommit(false);
+  }, []);
+
+  /**
+   * 强制收尾：不看后端回执，直接把本地状态放掉并收起遮罩。
+   * 用于「等太久了」与 committing 期间按 Esc——此时截图多半已经落盘 / 进剪贴板，
+   * 再把它扣在屏幕上是更坏的结局。
+   */
+  const busyRef = useRef(false);
+  const forceClose = useCallback(
+    (message?: string) => {
+      busyRef.current = false;
+      clearCommitWatchdog();
+      setCommitting(false);
+      setSaving(false);
+      reset();
+      releaseFrame();
+      if (message) toast(message);
+    },
+    [clearCommitWatchdog, reset, releaseFrame, toast],
+  );
+
+  const armCommitWatchdog = useCallback(() => {
+    clearCommitWatchdog();
+    commitStart.current = performance.now();
+    slowTimer.current = window.setTimeout(() => setSlowCommit(true), SLOW_COMMIT_MS);
+    commitTimer.current = window.setTimeout(() => {
+      commitTimer.current = null;
+      forceClose("这一步响应超时，已自动收起截图");
+    }, COMMIT_TIMEOUT_MS);
+  }, [clearCommitWatchdog, forceClose]);
+
+  /** 收遮罩但不让 UI 陪着一起等：IPC 卡住时最多等 HIDE_WAIT_MS */
+  const hideOverlayNow = useCallback(async () => {
+    await Promise.race([
+      cancelCapture().catch(() => {}),
+      new Promise<void>((resolve) => window.setTimeout(resolve, HIDE_WAIT_MS)),
+    ]);
+  }, []);
+
+  const exitCapture = useCallback(() => {
+    clearCommitWatchdog();
+    reset();
+    releaseFrame();
+    cancelCapture();
+  }, [clearCommitWatchdog, reset, releaseFrame]);
+
   // 遮罩打开：接收冻屏元数据，图像经 shot:// 协议加载。
   // 事件 + 挂载时主动拉取双通道（防 emit 早于监听器注册），按帧号去重。
-  const frameIdRef = useRef(0);
   const applyPayload = useCallback(
     (p: OverlayPayload) => {
-      // 只接受发给本窗口的载荷（多屏防串扰），并按帧号去重
+      // 只接受发给本窗口的载荷（多屏防串扰），并按帧号去重：
+      // 帧号单调递增，迟到的旧载荷不能把新一帧顶掉。
       if (p.label && p.label !== getCurrentWindow().label) return;
-      if (frameIdRef.current === p.frameId) return;
+      if (p.frameId <= frameIdRef.current) return;
       frameIdRef.current = p.frameId;
       if (releaseTimer.current) window.clearTimeout(releaseTimer.current);
+      if (rehideTimer.current) window.clearTimeout(rehideTimer.current);
+      frameLive.current = true;
+      // 新一轮截图：上一次提交可能还留着飞行层 / 兜底计时，全部作废
+      clearCommitWatchdog();
+      busyRef.current = false;
+      setCommitting(false);
+      setSaving(false);
+      setFlight(null);
       reset();
       setCursor(null);
       setFrame(p);
@@ -172,7 +268,7 @@ export default function Overlay() {
         setSel({ x: r.x / p.scale, y: r.y / p.scale, w: r.w / p.scale, h: r.h / p.scale });
       }
     },
-    [reset],
+    [clearCommitWatchdog, reset],
   );
 
   useEffect(() => {
@@ -473,22 +569,30 @@ export default function Overlay() {
    * 窗口却仍置顶可见，用户面对的是一块看不见但吃掉所有点击的全屏透明窗。
    *
    */
-  const busyRef = useRef(false);
   const withSel = (fn: (p: { x: number; y: number; w: number; h: number }) => Promise<unknown>) => {
     if (busyRef.current || !sel || sel.w < MIN_SIZE || sel.h < MIN_SIZE) return;
     const p = toPhysical(sel);
+    // 回执可能在新一轮截图之后才回来（超时兜底 / 主线程排队）：只认自己那一帧，
+    // 否则会把用户刚框好的新选区一起 reset 掉。
+    const frameId = frameIdRef.current;
     busyRef.current = true;
     setDrag(null);
     setCommitting(true);
+    armCommitWatchdog();
     fn(p)
       .then(() => {
+        if (frameIdRef.current !== frameId) return;
         reset();
         releaseFrame();
       })
-      .catch((e) => toast(`操作失败：${String(e)}`))
+      .catch((e) => {
+        if (frameIdRef.current === frameId) toast(`操作失败：${String(e)}`);
+      })
       .finally(() => {
+        if (frameIdRef.current !== frameId) return;
         busyRef.current = false;
         setCommitting(false);
+        clearCommitWatchdog();
       });
   };
 
@@ -502,7 +606,7 @@ export default function Overlay() {
     busyRef.current = true;
     setDrag(null);
     setCommitting(true);
-
+    armCommitWatchdog();
     let startedId = "";
     let saved = false;
     let flightDone = Promise.resolve();
@@ -532,8 +636,13 @@ export default function Overlay() {
       if (!landing || frameIdRef.current !== frameId) return;
       startFlight(landing);
       await flightDone;
+      // 后端 `land` 内部有 save / 主线程 / 绘制三段等待，最坏可能超过这里的上限；
+      // 超时后它仍会自己把那一条从 pending 摘掉，所以放弃等待是安全的。
+      // 先挂 catch：race 输掉之后它再 reject 就是一条没人处理的异常。
+      const landingPromise = lineLanded(landing.id);
+      landingPromise.catch(() => {});
       await Promise.race([
-        lineLanded(landing.id),
+        landingPromise,
         new Promise<never>((_, reject) => {
           landingTimer = window.setTimeout(
             () => reject(new Error("晾衣架显示超时")),
@@ -550,13 +659,16 @@ export default function Overlay() {
       flightResolve.current?.();
       if (frameIdRef.current === frameId) {
         if (saved) {
-          await cancelCapture().catch(() => {});
+          // 不能无限等：hide 的 IPC 一旦排不上主线程，这里就会把 committing
+          // 永远扣在屏幕上（Esc 也被拦着），只剩强杀一条路。
+          await hideOverlayNow();
           reset();
           releaseFrame();
         }
         setFlight(null);
         busyRef.current = false;
         setCommitting(false);
+        clearCommitWatchdog();
       }
     }
   };
@@ -575,17 +687,18 @@ export default function Overlay() {
   const doSave = async () => {
     if (busyRef.current || !sel || sel.w < MIN_SIZE || sel.h < MIN_SIZE) return;
     const p = toPhysical(sel);
+    const frameId = frameIdRef.current;
     busyRef.current = true;
     setDrag(null);
     setSaving(true);
     try {
       const saved = await saveRegion(p.x, p.y, p.w, p.h);
-      if (saved) {
+      if (saved && frameIdRef.current === frameId) {
         reset();
         releaseFrame();
       }
     } catch (e) {
-      toast(`保存失败：${String(e)}`);
+      if (frameIdRef.current === frameId) toast(`保存失败：${String(e)}`);
     } finally {
       busyRef.current = false;
       setSaving(false);
@@ -654,8 +767,15 @@ export default function Overlay() {
         return;
       }
 
-      // 输出动作进行中：选区画面必须保持原样，屏蔽其余按键
-      if (committing) return;
+      // 输出动作进行中：选区画面必须保持原样，屏蔽其余按键。
+      // 唯一例外是「真的卡住了」——超过宽限时间还按 Esc，必须放用户走，
+      // 否则这块全屏置顶窗只能靠托盘强杀才能收掉。
+      if (committing) {
+        if (e.key === "Escape" && performance.now() - commitStart.current > ESC_GRACE_MS) {
+          forceClose("已强制收起截图");
+        }
+        return;
+      }
 
       if (e.key === "Escape") {
         exitCapture();
@@ -723,7 +843,7 @@ export default function Overlay() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel, ocr, hex, rgb, frame, scale, elemMode, committing, saving]);
+  }, [sel, ocr, hex, rgb, frame, scale, elemMode, committing, saving, forceClose]);
 
   // ===================== 派生渲染量 =====================
 
@@ -882,6 +1002,17 @@ export default function Overlay() {
             transformOrigin: "top left",
           }}
         />
+      )}
+
+      {/* 提交久等不回：给一个「它还活着」的信号。正常路径几百毫秒就结束，
+          不会闪出这个胶囊；只有真的慢（后端写盘 / 主线程忙）才看得到。 */}
+      {committing && slowCommit && !flight && (
+        <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center">
+          <div className="glass flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[12px] text-ink-100 shadow-pop">
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/25 border-t-white/85" />
+            处理中…
+          </div>
+        </div>
       )}
 
       {/* 拖到屏幕顶端：告诉用户「松手就挂上去了」 */}

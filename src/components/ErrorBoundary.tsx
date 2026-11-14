@@ -1,6 +1,13 @@
 import { Component, type ReactNode } from "react";
 
-type Props = { children: ReactNode };
+type Props = {
+  children: ReactNode;
+  /**
+   * 出错时的额外收尾。遮罩窗必须传：它是一块整屏置顶窗，渲染树一崩，
+   * 用户连关都关不掉——只能去托盘强杀进程。
+   */
+  onError?: (error: Error) => void;
+};
 type State = { error: Error | null };
 
 /**
@@ -16,6 +23,11 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: unknown) {
     console.error("[snapix] 窗口渲染失败", error, info);
+    try {
+      this.props.onError?.(error);
+    } catch {
+      // 收尾本身出错不能再抛，否则整棵错误树会再崩一次
+    }
   }
 
   render() {

@@ -22,6 +22,7 @@ import {
   type LineReturnFlight,
 } from "@/lib/ipc";
 import { afterPaint, animateFlight, FLIGHT_EASE, physicalToLocal } from "@/lib/flight";
+import { pickFreshIds } from "@/lib/lineFresh";
 
 const ROPE_Y = 40;
 const HANG = 14;
@@ -77,24 +78,47 @@ export default function Line() {
   } | null>(null);
   const [menuConfirm, setMenuConfirm] = useState(false);
   const prevVisible = useRef<Set<string> | null>(null);
+  /** 刚由「飞向绳子」落地的图：它已经在本位了，绝不能再播一次入场动画 */
+  const landedIds = useRef<Set<string>>(new Set());
+  const reloading = useRef(false);
+  const reloadDirty = useRef(false);
   const flightLayer = useRef<HTMLDivElement>(null);
   const active = useRef<Flight | null>(null);
   const acting = useRef(false);
   const reloadVersion = useRef(0);
+  /**
+   * 一次提交会连发 2–3 条 `line:changed`（挂图 / 落地 / 显形）。逐条拉列表会让整排
+   * 缩略图重复重建、`placed` 反复重算，飞行落地那几帧平白多掉。这里合并同批请求：
+   * 正在拉的时候只记一个「脏」标记，回来再补一次，不会漏也不会堆。
+   */
   const reload = useCallback(async () => {
-    const version = ++reloadVersion.current;
+    if (reloading.current) {
+      reloadDirty.current = true;
+      return;
+    }
+    reloading.current = true;
     try {
-      const list = await lineList();
-      if (version === reloadVersion.current) setItems(list);
+      do {
+        reloadDirty.current = false;
+        const version = ++reloadVersion.current;
+        const list = await lineList();
+        if (version === reloadVersion.current) setItems(list);
+      } while (reloadDirty.current);
     } catch (e) {
       setError(`无法加载截图：${String(e)}`);
+    } finally {
+      reloading.current = false;
     }
   }, []);
 
   useEffect(() => {
     let disposed = false;
-    const un = listen("line:changed", () => {
-      if (!disposed) void reload();
+    // 载荷是「刚刚落地的那张」的 id：后端在 `land` 里带着它发出来，就是为了让这里
+    // 跳过入场动画（这张是飞过来的，再播一次「从绳上垂下」就会看到一次弹跳）。
+    const un = listen<string | null>("line:changed", (e) => {
+      if (disposed) return;
+      if (e.payload) landedIds.current.add(e.payload);
+      void reload();
     });
     void un.then(() => {
       if (!disposed) void reload();
@@ -142,6 +166,8 @@ export default function Line() {
     [items],
   );
   // 新图落地时播一次「从绳上垂下」的入场动画；首次加载不播，避免整排一起掉。
+  // 但「飞过来」的那张已经精确落在目标位，必须排除——否则会在落点上方 40px 处
+  // 重新出现一次，再掉下来，用户看到的就是一次莫名其妙的弹跳。
   useEffect(() => {
     const visible = items.filter((it) => !it.pending);
     const ids = new Set(visible.map((it) => it.id));
@@ -149,8 +175,12 @@ export default function Line() {
       prevVisible.current = ids;
       return;
     }
-    const fresh = visible.filter((it) => !prevVisible.current!.has(it.id)).map((it) => it.id);
+    const fresh = pickFreshIds(prevVisible.current, items, landedIds.current);
     prevVisible.current = ids;
+    // 已经不在绳上的落地 id 顺手清掉，集合不会随会话无限增长
+    for (const id of landedIds.current) {
+      if (!ids.has(id)) landedIds.current.delete(id);
+    }
     if (!fresh.length) return;
     setFreshIds(new Set(fresh));
     const timer = window.setTimeout(() => setFreshIds(new Set()), 700);

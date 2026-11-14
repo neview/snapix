@@ -110,6 +110,14 @@ export function overlayClaim() {
   return invoke("overlay_claim");
 }
 
+/**
+ * 本帧已用完，请收起遮罩。带帧号与状态校验：新一轮截图已经接管时是空操作，
+ * 所以可以安全地作为「第一次收遮罩失败」的兜底补刀。
+ */
+export function overlayRelease(frameId: number) {
+  return invoke("overlay_release", { frameId });
+}
+
 /** 延时截图。 */
 export function captureDelayed(secs: number) {
   return invoke("capture_delayed", { secs });

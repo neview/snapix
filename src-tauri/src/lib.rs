@@ -568,6 +568,7 @@ pub fn run() {
             capture::overlay_ready,
             capture::overlay_fetch,
             capture::overlay_claim,
+            capture::overlay_release,
             capture::capture_delayed,
             capture::capture_full,
             capture::capture_window,

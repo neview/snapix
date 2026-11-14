@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 use serde::Serialize;
@@ -72,6 +72,8 @@ pub struct CaptureState {
     frame_seq: AtomicU64,
     /// 抓屏准备中门闩：防止连按快捷键时并发抓屏
     preparing: AtomicBool,
+    /// 收遮罩的重试线程在跑：多次 hide 不叠加线程
+    hiding: AtomicBool,
     /// 本次唤起的起点：用于记录「快捷键 → 遮罩首帧」耗时
     pub capture_started: Mutex<Option<Instant>>,
 }
@@ -209,15 +211,38 @@ struct OverlayJob {
 }
 
 fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<SelRect>) {
-    // 门闩：遮罩已开 / 滚动中 / 上次仍在准备 → 忽略（去抖，防连按重复抓屏叠加卡顿）
     let Some(state) = app.try_state::<CaptureState>() else {
         return;
     };
-    if overlay_visible(app) || crate::scroll::is_active(app) || crate::gifrec::is_active(app) {
+    if crate::scroll::is_active(app) || crate::gifrec::is_active(app) {
         return;
     }
+    // 遮罩已经开着 → 去抖，忽略这次唤起。但「可见却没有冻屏帧」是一种病态状态：
+    // 上一次提交把帧清掉了、窗口却没真正收掉（hide 超时被静默忽略），此时它是一块
+    // 吃掉所有点击的全屏置顶窗，快捷键、托盘都会被它挡死。识别出来就地回收再继续，
+    // 让「按一次截图键」成为用户的逃生通道，而不是只能强杀进程。
+    if overlay_visible(app) {
+        // 作用域：不能持帧锁去调 hide_overlay（它自己也要拿这把锁）
+        let has_frame = {
+            let frames = lock(&state.frames);
+            !frames.is_empty()
+        };
+        if has_frame {
+            return;
+        }
+        log::warn!("检测到无帧遮罩（上次收起未生效），回收后继续本次截图");
+        hide_overlay(app);
+    }
     if state.preparing.swap(true, Ordering::SeqCst) {
-        return;
+        // 抓屏线程若卡在某个系统调用里，这个门闩会永久锁死所有截图入口。
+        // 超过 8s 说明那一轮已经失联，强行接管（旧线程即使回来也只会覆盖自己的帧）。
+        let stale = lock(&state.capture_started)
+            .map(|t| t.elapsed() > Duration::from_secs(8))
+            .unwrap_or(true);
+        if !stale {
+            return;
+        }
+        log::warn!("抓屏门闩已超时，强制接管");
     }
     *lock(&state.capture_started) = Some(Instant::now());
 
@@ -307,15 +332,25 @@ fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<
                 .collect();
 
             let frame_id = state.frame_seq.fetch_add(1, Ordering::SeqCst) + 1;
-            lock(&state.frames).insert(
-                label.clone(),
-                Frame {
-                    id: frame_id,
-                    image,
-                    origin: (mx, my),
-                    scale,
-                },
-            );
+            // 抓屏线程之间可能交错（门闩超时后新旧两轮并存）：只允许更新的帧落库，
+            // 否则一轮迟到的旧抓屏会把刚显示的新帧顶掉，遮罩就成了旧画面。
+            {
+                let mut frames = lock(&state.frames);
+                let fresh = frames.get(&label).is_none_or(|f| f.id < frame_id);
+                if !fresh {
+                    log::warn!("丢弃迟到的旧帧 {frame_id}（{label} 已有更新的帧）");
+                    continue;
+                }
+                frames.insert(
+                    label.clone(),
+                    Frame {
+                        id: frame_id,
+                        image,
+                        origin: (mx, my),
+                        scale,
+                    },
+                );
+            }
 
             let payload = OverlayPayload {
                 label: label.clone(),
@@ -331,7 +366,14 @@ fn show_overlay_impl(app: &AppHandle, at: Option<(i32, i32)>, preselect: Option<
                     _ => None,
                 },
             };
-            lock(&state.pending).insert(label.clone(), payload.clone());
+            {
+                // 同理：旧载荷不能覆盖待取的新载荷（窗口挂载时那条 overlay_fetch 通道）
+                let mut pending = lock(&state.pending);
+                let fresh = pending.get(&label).is_none_or(|p| p.frame_id < frame_id);
+                if fresh {
+                    pending.insert(label.clone(), payload.clone());
+                }
+            }
 
             jobs.push(OverlayJob {
                 label,
@@ -389,6 +431,35 @@ pub fn overlay_claim(window: tauri::WebviewWindow, app: AppHandle) {
     }
 }
 
+/// 前端确认「这一帧已经用完了，遮罩可以收」。
+///
+/// 与 `cancel_capture` 的区别是带帧号与状态校验：新一轮截图已经接管（有帧、或正在
+/// 抓屏）时它是空操作。前端在收尾后补一次这个调用，用来兜住「第一次收遮罩失败」
+/// ——那种情况下窗口里已经没有画面，不会再有任何入口，只能靠这类兜底补刀。
+#[tauri::command]
+pub async fn overlay_release(window: tauri::WebviewWindow, app: AppHandle, frame_id: u64) {
+    let Some(state) = app.try_state::<CaptureState>() else {
+        return;
+    };
+    let label = window.label().to_string();
+    // 新一轮抓屏已经开始：绝不能把即将显示的新遮罩一起收掉
+    if state.preparing.load(Ordering::SeqCst) {
+        return;
+    }
+    // 注意作用域：持锁期间绝不能调 hide_overlay —— 它自己也要拿这把锁，
+    // 同一线程重入 std Mutex 就是永久自锁。
+    let taken_over = {
+        let frames = lock(&state.frames);
+        frames.get(&label).is_some_and(|f| f.id != frame_id)
+    };
+    if taken_over {
+        // 更高帧号已经接管这块屏，交给它
+        return;
+    }
+    // 这一帧还在，或帧已被清空（上一轮收尾失败）：都可以安全地收
+    hide_overlay(&app);
+}
+
 /// 前端冻屏图渲染完毕，安全显示对应遮罩窗（帧号必须仍是当前帧）。
 /// 显示后再次断言窗口几何：跨 DPI 移动时隐藏态的 set_size 可能被系统重算。
 /// `async`：在 WebView2 回调内同步 show 自己所在的窗口有互锁风险（见 lib.rs 说明）。
@@ -413,6 +484,38 @@ pub async fn overlay_ready(window: tauri::WebviewWindow, app: AppHandle, frame_i
     let _ = window.set_position(PhysicalPosition::new(mx, my));
     let _ = window.set_size(PhysicalSize::new(mw, mh));
     let _ = window.set_always_on_top(true);
+
+    // 上面四行与「收遮罩」可能交错：hide_overlay 在检查之后清掉了帧，这里却把窗口
+    // 显示了出来，就会留下一块没有画面、却吃掉所有点击的幽灵遮罩。显示后必须再断言
+    // 一次帧号——只有「帧还在」才是合法的显示。
+    enum Alive {
+        /// 帧还在，显示有效
+        Ok,
+        /// 已经有更新的帧接管这块屏：什么都不做，别把新一轮截图收掉
+        Taken,
+        /// 帧被清空（这一轮已收尾）：立刻把窗口收回
+        Gone,
+    }
+    let alive = {
+        let frames = lock(&state.frames);
+        match frames.get(&label) {
+            Some(f) if f.id == frame_id => Alive::Ok,
+            Some(_) => Alive::Taken,
+            None => Alive::Gone,
+        }
+    };
+    match alive {
+        Alive::Ok => {}
+        Alive::Taken => {
+            log::warn!("遮罩 {label} 已被更新的帧接管，忽略这次迟到显示");
+            return;
+        }
+        Alive::Gone => {
+            log::warn!("遮罩 {label} 的帧已作废，撤销显示");
+            let _ = window.hide();
+            return;
+        }
+    }
 
     // 光标所在屏获得键盘焦点（其余屏靠鼠标移入时自取焦点）
     let on_cursor_monitor = app
@@ -598,14 +701,69 @@ pub async fn repeat_capture(app: AppHandle) {
 }
 
 /// 隐藏全部遮罩窗并清空冻屏缓存。
+///
+/// `hide()` 不是「立刻就不见了」：它要排进主线程。主线程此刻可能在创建 WebView2
+/// 窗口、跑原生对话框的消息循环，`send_user_message` 会在超时后返回 Err——而这里
+/// 以前是 `let _ =` 直接忽略。结果就是这块全屏置顶窗留在屏幕上，前端却已经把状态
+/// 清空、关掉了所有入口，用户只剩「托盘强杀」一条路。
+///
+/// 所以：先自己收一次，收不掉就挂后台重试，直到窗口真的不可见为止。
 pub fn hide_overlay(app: &AppHandle) {
-    for (_, win) in overlay_windows(app) {
-        let _ = win.hide();
+    let Some(state) = app.try_state::<CaptureState>() else {
+        return;
+    };
+    lock(&state.frames).clear();
+    lock(&state.pending).clear();
+
+    let mut failed: Vec<String> = Vec::new();
+    for (label, win) in overlay_windows(app) {
+        let hidden = win.hide().is_ok() && !win.is_visible().unwrap_or(false);
+        if !hidden {
+            failed.push(label);
+        }
     }
-    if let Some(state) = app.try_state::<CaptureState>() {
-        lock(&state.frames).clear();
-        lock(&state.pending).clear();
+    if failed.is_empty() {
+        return;
     }
+    log::warn!("遮罩隐藏未完成，后台重试: {failed:?}");
+
+    // 重试线程同一时间只跑一个。它每轮重新枚举「可见但没有帧」的窗口，
+    // 所以既不会漏掉新出现的失败，也绝不可能误收下一次截图。
+    if state.hiding.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut remaining: Vec<String> = failed;
+        for round in 0..20 {
+            std::thread::sleep(Duration::from_millis(250));
+            let Some(state) = app.try_state::<CaptureState>() else {
+                return;
+            };
+            let mut still: Vec<String> = Vec::new();
+            for (label, win) in overlay_windows(&app) {
+                if lock(&state.frames).contains_key(&label) {
+                    continue; // 新一轮截图已经接管
+                }
+                if !win.is_visible().unwrap_or(false) {
+                    continue;
+                }
+                if win.hide().is_err() || win.is_visible().unwrap_or(false) {
+                    still.push(label);
+                }
+            }
+            if still.is_empty() {
+                log::info!("遮罩已在第 {} 次重试后收起", round + 1);
+                state.hiding.store(false, Ordering::SeqCst);
+                return;
+            }
+            remaining = still;
+        }
+        log::error!("遮罩仍然可见，放弃重试: {remaining:?}");
+        if let Some(state) = app.try_state::<CaptureState>() {
+            state.hiding.store(false, Ordering::SeqCst);
+        }
+    });
 }
 
 /// 飞行只拥有发起时的这一帧；旧落地 / 超时不能收掉下一次截图。
@@ -633,9 +791,18 @@ pub(crate) fn on_main_thread<T: Send + 'static>(
     app: &AppHandle,
     f: impl FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
+    on_main_thread_within(app, Duration::from_secs(5), f)
+}
+
+/// 同上，但可以指定等待上限。收尾链路（截图遮罩必须尽快放开）用更短的超时——
+/// 主线程被建窗 / 造弹窗占住时，宁可快速失败交给兜底，也不要让用户对着冻屏干等。
+pub(crate) fn on_main_thread_within<T: Send + 'static>(
+    app: &AppHandle,
+    timeout: Duration,
+    f: impl FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = app.clone();
-    let timeout = std::time::Duration::from_secs(5);
     let deadline = std::time::Instant::now() + timeout;
     app.run_on_main_thread(move || {
         // 已经超时的排队任务不能迟到后再创建 / 显示 / 删除源图片。
