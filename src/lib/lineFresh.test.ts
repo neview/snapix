@@ -18,11 +18,15 @@ describe("pickFreshIds", () => {
   });
 
   it("刚落地的那张 pending 被摘掉、又在 landing 集合里 → 依然不播", () => {
-    expect(pickFreshIds(set("a"), [{ id: "a" }, { id: "b", pending: false }], set("b"))).toEqual([]);
+    expect(pickFreshIds(set("a"), [{ id: "a" }, { id: "b", pending: false }], set("b"))).toEqual(
+      [],
+    );
   });
 
   it("与落地集合无关的新条目照旧播（例如编辑器导出的图）", () => {
-    expect(pickFreshIds(set("a"), [{ id: "a" }, { id: "b" }, { id: "c" }], set("b"))).toEqual(["c"]);
+    expect(pickFreshIds(set("a"), [{ id: "a" }, { id: "b" }, { id: "c" }], set("b"))).toEqual([
+      "c",
+    ]);
   });
 
   it("首次加载时调用方不传 prev，这里只验证它不会把已有条目当新条目", () => {
